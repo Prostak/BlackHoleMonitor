@@ -63,7 +63,7 @@ struct ContentView: View {
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
             Text(String(
-                format: "Auto-stop at %.1f dB (%.1f%% amplitude)",
+                format: "Auto-stop at %.1f dB (%.2f%% amplitude)",
                 AudioLevelMonitor.triggerThresholdDB,
                 triggerPercent
             ))

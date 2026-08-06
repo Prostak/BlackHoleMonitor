@@ -8,10 +8,12 @@ import Foundation
 final class AudioLevelMonitor: NSObject, ObservableObject {
     static let targetDeviceName = "BlackHole 2ch"
     static let historyCapacity = 240
-    static let triggerThresholdDB: Float = -28
+    static let referencePeakDB: Float = -28
+    static let triggerThresholdScale: Float = 0.72
     static let triggerDelaySeconds: TimeInterval = 0.5
 
-    static var triggerThresholdRMS: Float { rms(fromDB: triggerThresholdDB) }
+    static var triggerThresholdRMS: Float { rms(fromDB: referencePeakDB) * triggerThresholdScale }
+    static var triggerThresholdDB: Float { db(fromRMS: triggerThresholdRMS) }
 
     @Published private(set) var levelRMS: Float = 0
     @Published private(set) var peakRMS: Float = 0
