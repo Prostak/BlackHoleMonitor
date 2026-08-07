@@ -3,23 +3,28 @@ import SwiftUI
 struct ContentView: View {
     @ObservedObject var monitor: AudioLevelMonitor
 
-    private var triggerPercent: Float {
-        AudioLevelMonitor.triggerThresholdRMS * 100
-    }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             header
+            inputControls
             levelReadout
             LevelMeterView(
                 levelRMS: monitor.levelRMS,
                 peakRMS: monitor.peakRMS,
-                thresholdRMS: AudioLevelMonitor.triggerThresholdRMS
+                thresholdRMS: monitor.triggerThresholdRMS,
+                maxRMS: monitor.graphMaxRMS
             )
-            LevelGraphView(
-                samples: monitor.levelHistory,
-                thresholdRMS: AudioLevelMonitor.triggerThresholdRMS
-            )
+            HStack(alignment: .top, spacing: 8) {
+                LevelGraphView(
+                    samples: monitor.levelHistory,
+                    thresholdRMS: monitor.triggerThresholdRMS,
+                    maxRMS: monitor.graphMaxRMS
+                )
+                ThresholdSliderView(
+                    thresholdRMS: $monitor.triggerThresholdRMS,
+                    maxRMS: monitor.graphMaxRMS
+                )
+            }
             .frame(height: 180)
 
             HStack {
@@ -51,6 +56,7 @@ struct ContentView: View {
         }
         .foregroundStyle(.white)
         .onAppear {
+            monitor.refreshInputDevices()
             monitor.requestPermissionAndStart()
         }
     }
@@ -59,16 +65,40 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 4) {
             Text("BlackHole Monitor")
                 .font(.title2.weight(.semibold))
-            Text("Input: \(monitor.selectedDeviceName ?? AudioLevelMonitor.targetDeviceName)")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
             Text(String(
-                format: "Trigger at %.1f dB (%.2f%% amplitude) → Screen Sharing",
-                AudioLevelMonitor.triggerThresholdDB,
-                triggerPercent
+                format: "Trigger %.2f%% · scale %.2f%% · saved per input",
+                monitor.triggerThresholdRMS * 100,
+                monitor.graphMaxRMS * 100
             ))
             .font(.caption)
             .foregroundStyle(.secondary)
+        }
+    }
+
+    private var inputControls: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Input")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Picker("Input", selection: Binding(
+                    get: { monitor.selectedInputUID },
+                    set: { monitor.selectInput(uid: $0) }
+                )) {
+                    ForEach(monitor.availableInputs) { input in
+                        Text(input.name).tag(input.uid)
+                    }
+                }
+                .labelsHidden()
+                .frame(maxWidth: .infinity, alignment: .leading)
+
+                Button("Refresh") {
+                    monitor.refreshInputDevices()
+                }
+            }
+
+            Toggle("Pass-through to speakers", isOn: $monitor.passThroughEnabled)
+                .toggleStyle(.switch)
         }
     }
 
@@ -130,7 +160,7 @@ struct ContentView: View {
     }
 
     private func color(for rms: Float) -> Color {
-        let threshold = AudioLevelMonitor.triggerThresholdRMS
+        let threshold = monitor.triggerThresholdRMS
         if rms >= threshold {
             return .red
         }
@@ -146,5 +176,5 @@ struct ContentView: View {
 
 #Preview {
     ContentView(monitor: AudioLevelMonitor())
-        .frame(width: 520, height: 360)
+        .frame(width: 560, height: 400)
 }

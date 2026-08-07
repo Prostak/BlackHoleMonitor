@@ -1,11 +1,13 @@
 import AppKit
 import ApplicationServices
+import Carbon
 import Foundation
 
 enum ScreenSharingAutomation {
     static let bundleIdentifier = "com.apple.ScreenSharing"
     static let applicationName = "Screen Sharing"
     static let activationDelaySeconds: TimeInterval = 0.2
+    static let layoutSwitchDelaySeconds: TimeInterval = 0.05
     static let secondFocusSettleDelaySeconds: TimeInterval = 0.5
     static let postSecondKeyReturnDelaySeconds: TimeInterval = 0.5
     static let secondBacktickBaseDelaySeconds: TimeInterval = 1.15
@@ -22,12 +24,12 @@ enum ScreenSharingAutomation {
         }
 
         try? await Task.sleep(for: .seconds(activationDelaySeconds))
-        return sendBacktick()
+        return await sendBacktick()
     }
 
     @discardableResult
-    static func typeBacktick() -> Bool {
-        sendBacktick()
+    static func typeBacktick() async -> Bool {
+        await sendBacktick()
     }
 
     @discardableResult
@@ -37,7 +39,7 @@ enum ScreenSharingAutomation {
         }
 
         try? await Task.sleep(for: .seconds(secondFocusSettleDelaySeconds))
-        return sendBacktick()
+        return await sendBacktick()
     }
 
     @MainActor
@@ -92,7 +94,39 @@ enum ScreenSharingAutomation {
     }
 
     @discardableResult
-    private static func sendBacktick() -> Bool {
+    private static func sendBacktick() async -> Bool {
+        await MainActor.run {
+            switchToEnglishKeyboard()
+        }
+        try? await Task.sleep(for: .seconds(layoutSwitchDelaySeconds))
+        return await MainActor.run {
+            postBacktickKeyEvent()
+        }
+    }
+
+    @MainActor
+    private static func switchToEnglishKeyboard() {
+        guard let sourceList = TISCreateInputSourceList(nil, false)?.takeRetainedValue() else {
+            return
+        }
+
+        let count = CFArrayGetCount(sourceList)
+        for index in 0..<count {
+            let value = CFArrayGetValueAtIndex(sourceList, index)
+            let source = unsafeBitCast(value, to: TISInputSource.self)
+            guard let sourceIDPointer = TISGetInputSourceProperty(source, kTISPropertyInputSourceID) else {
+                continue
+            }
+            let sourceID = Unmanaged<CFString>.fromOpaque(sourceIDPointer).takeUnretainedValue() as String
+            if sourceID.hasPrefix("com.apple.keylayout.ABC") || sourceID == "com.apple.keylayout.US" {
+                TISSelectInputSource(source)
+                return
+            }
+        }
+    }
+
+    @MainActor
+    private static func postBacktickKeyEvent() -> Bool {
         guard let source = CGEventSource(stateID: .hidSystemState) else {
             return false
         }

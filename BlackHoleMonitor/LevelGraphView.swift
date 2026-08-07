@@ -3,7 +3,7 @@ import SwiftUI
 struct LevelGraphView: View {
     let samples: [Float]
     let thresholdRMS: Float
-    let maxRMS: Float = 0.12
+    let maxRMS: Float
 
     var body: some View {
         GeometryReader { geometry in
@@ -23,7 +23,8 @@ struct LevelGraphView: View {
 
     private func drawGrid(in size: CGSize, context: inout GraphicsContext) {
         let gridColor = Color.white.opacity(0.08)
-        let lines: [Float] = [0, 0.02, 0.04, 0.06, 0.08, 0.10, 0.12]
+        let step = maxRMS / 6
+        let lines = (0...6).map { Float($0) * step }
 
         for value in lines {
             let y = yPosition(for: value, height: size.height)
@@ -87,7 +88,7 @@ struct LevelMeterView: View {
     let levelRMS: Float
     let peakRMS: Float
     let thresholdRMS: Float
-    let maxRMS: Float = 0.12
+    let maxRMS: Float
 
     var body: some View {
         GeometryReader { geometry in
@@ -136,5 +137,62 @@ struct LevelMeterView: View {
             startPoint: .leading,
             endPoint: .trailing
         )
+    }
+}
+
+struct ThresholdSliderView: View {
+    @Binding var thresholdRMS: Float
+    let maxRMS: Float
+
+    var body: some View {
+        VStack(spacing: 6) {
+            Text(String(format: "%.2f%%", thresholdRMS * 100))
+                .font(.system(size: 10, weight: .medium, design: .monospaced))
+                .foregroundStyle(.red.opacity(0.9))
+
+            GeometryReader { geometry in
+                ZStack(alignment: .bottom) {
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(Color.white.opacity(0.08))
+
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(Color.red.opacity(0.25))
+                        .frame(height: geometry.size.height * normalizedThreshold)
+
+                    Circle()
+                        .fill(Color.red)
+                        .frame(width: 16, height: 16)
+                        .overlay {
+                            Circle().strokeBorder(Color.white.opacity(0.8), lineWidth: 1)
+                        }
+                        .position(
+                            x: geometry.size.width / 2,
+                            y: geometry.size.height * (1 - normalizedThreshold)
+                        )
+                }
+                .contentShape(Rectangle())
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { value in
+                            thresholdRMS = rms(for: value.location.y, height: geometry.size.height)
+                        }
+                )
+            }
+
+            Text(String(format: "Scale %.2f%%", maxRMS * 100))
+                .font(.system(size: 9, weight: .medium, design: .monospaced))
+                .foregroundStyle(.secondary)
+        }
+        .frame(width: 44)
+    }
+
+    private var normalizedThreshold: CGFloat {
+        CGFloat(min(max(thresholdRMS / maxRMS, 0), 1))
+    }
+
+    private func rms(for y: CGFloat, height: CGFloat) -> Float {
+        let normalized = 1 - Float(y / max(height, 1))
+        let clamped = min(max(normalized, 0), 1) * maxRMS
+        return max(clamped, AudioLevelMonitor.minimumTriggerRMS)
     }
 }

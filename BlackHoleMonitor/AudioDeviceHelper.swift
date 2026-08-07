@@ -47,6 +47,10 @@ enum AudioDeviceHelper {
         inputDevices().first { $0.name == targetName }?.id
     }
 
+    static func findInputDevice(uid: String) -> AudioDeviceID? {
+        inputDevices().first { deviceUID($0.id) == uid }?.id
+    }
+
     static func deviceUID(_ deviceID: AudioDeviceID) -> String? {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyDeviceUID,

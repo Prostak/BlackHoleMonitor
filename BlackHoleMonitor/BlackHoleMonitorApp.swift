@@ -8,7 +8,7 @@ struct BlackHoleMonitorApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView(monitor: monitor)
-                .frame(minWidth: 520, minHeight: 360)
+                .frame(minWidth: 560, minHeight: 420)
         }
         .windowStyle(.hiddenTitleBar)
         .commands {

@@ -17,7 +17,7 @@ macOS-приложение для мониторинга уровня аудио
 
 ## Сборка и установка (рекомендуется)
 
-Чтобы **Accessibility** не сбрасывался при каждой пересборке, установите постоянную копию в `~/Applications`:
+Чтобы путь к `.app` был стабильным (`~/Applications`), используйте установку через скрипт:
 
 ```bash
 cd ~/Projects/BlackHoleMonitor
@@ -28,9 +28,20 @@ open ~/Applications/BlackHoleMonitor.app
 
 Один раз выдайте разрешения для **этой** копии:
 - **Microphone** — при первом запуске
-- **Accessibility** — System Settings → Privacy & Security → Accessibility → **BlackHoleMonitor**
+- **Accessibility** — см. раздел ниже (нужно обновлять после каждой переустановки)
 
 Дальше запускайте только `~/Applications/BlackHoleMonitor.app`, а не ⌘R в Xcode. После изменений в коде снова запустите `./scripts/install.sh`.
+
+### Accessibility permissions (English)
+
+Each time you **rebuild and reinstall** the app (`./scripts/install.sh`), macOS treats it as a new binary. You must **remove BlackHoleMonitor from the Accessibility list and add it again**:
+
+1. Open **System Settings → Privacy & Security → Accessibility**
+2. Select **BlackHoleMonitor** and click **−** to remove it
+3. Run the newly installed app from `~/Applications/BlackHoleMonitor.app`
+4. When prompted, allow control of your computer — or click **+** and add `~/Applications/BlackHoleMonitor.app` manually
+
+Microphone permission usually survives reinstalls; Accessibility does not.
 
 ## Разработка в Xcode
 

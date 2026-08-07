@@ -4,17 +4,22 @@ import Combine
 import CoreMedia
 import Foundation
 
+struct AudioInputOption: Identifiable, Hashable {
+    let uid: String
+    let name: String
+    var id: String { uid }
+}
+
 @MainActor
 final class AudioLevelMonitor: NSObject, ObservableObject {
-    static let targetDeviceName = "BlackHole 2ch"
+    static let defaultDeviceName = "BlackHole 2ch"
     static let historyCapacity = 240
-    static let referencePeakDB: Float = -28
-    static let triggerThresholdScale: Float = 0.72
+    static let absoluteGraphMaxRMS: Float = GraphScaleStore.absoluteGraphMax
     static let triggerDelaySeconds: TimeInterval = 0.5
     static let rearmThresholdFraction: Float = 0.5
+    static let minimumTriggerRMS: Float = 0.001
 
-    static var triggerThresholdRMS: Float { rms(fromDB: referencePeakDB) * triggerThresholdScale }
-    static var triggerThresholdDB: Float { db(fromRMS: triggerThresholdRMS) }
+    var triggerThresholdDB: Float { Self.db(fromRMS: triggerThresholdRMS) }
 
     @Published private(set) var levelRMS: Float = 0
     @Published private(set) var peakRMS: Float = 0
@@ -23,8 +28,24 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
     @Published private(set) var permissionGranted = false
     @Published private(set) var statusMessage = "Requesting microphone access…"
     @Published private(set) var selectedDeviceName: String?
+    @Published private(set) var availableInputs: [AudioInputOption] = []
+    @Published var selectedInputUID: String = ""
+    @Published var triggerThresholdRMS: Float = ThresholdStore.defaultThresholdRMS {
+        didSet {
+            guard !isLoadingThreshold, !selectedInputUID.isEmpty else { return }
+            ThresholdStore.save(uid: selectedInputUID, rms: triggerThresholdRMS)
+        }
+    }
+    @Published private(set) var graphMaxRMS: Float = GraphScaleStore.defaultGraphMax
+    @Published var passThroughEnabled = false {
+        didSet {
+            guard oldValue != passThroughEnabled else { return }
+            updatePassThrough()
+        }
+    }
 
     private let captureSession = AVCaptureSession()
+    private let passThrough = AudioPassThrough()
     private let captureQueue = DispatchQueue(label: "com.blackholemonitor.capture", qos: .userInteractive)
     private var peakHoldRMS: Float = 0
     private var peakHoldUntil: Date = .distantPast
@@ -32,8 +53,10 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
     private var isArmed = true
     private var awaitingRearm = false
     private var automationTask: Task<Void, Never>?
+    private var isLoadingThreshold = false
 
     func requestPermissionAndStart() {
+        refreshInputDevices()
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .authorized:
             permissionGranted = true
@@ -58,8 +81,62 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
         }
     }
 
+    func refreshInputDevices() {
+        let devices = AudioDeviceHelper.inputDevices().compactMap { device -> AudioInputOption? in
+            guard let uid = AudioDeviceHelper.deviceUID(device.id) else { return nil }
+            return AudioInputOption(uid: uid, name: device.name)
+        }
+        availableInputs = devices
+
+        if selectedInputUID.isEmpty || !devices.contains(where: { $0.uid == selectedInputUID }) {
+            selectedInputUID = devices.first(where: { $0.name == Self.defaultDeviceName })?.uid
+                ?? devices.first?.uid
+                ?? ""
+        }
+        loadSettingsForCurrentInput()
+    }
+
+    func selectInput(uid: String) {
+        guard uid != selectedInputUID else { return }
+        selectedInputUID = uid
+        selectedDeviceName = availableInputs.first(where: { $0.uid == uid })?.name
+        loadSettingsForCurrentInput()
+
+        if isRunning {
+            startMonitoring()
+        } else {
+            updatePassThrough()
+        }
+    }
+
+    func setTriggerThresholdRMS(_ rms: Float) {
+        triggerThresholdRMS = min(max(rms, Self.minimumTriggerRMS), graphMaxRMS)
+    }
+
+    private func loadSettingsForCurrentInput() {
+        guard !selectedInputUID.isEmpty else { return }
+        isLoadingThreshold = true
+        graphMaxRMS = GraphScaleStore.graphMaxRMS(for: selectedInputUID, deviceName: selectedDeviceName)
+        triggerThresholdRMS = min(
+            ThresholdStore.threshold(for: selectedInputUID, deviceName: selectedDeviceName),
+            graphMaxRMS
+        )
+        isLoadingThreshold = false
+    }
+
+    private func updateGraphScale(with peak: Float) {
+        guard !selectedInputUID.isEmpty else { return }
+        let newMax = GraphScaleStore.recordPeak(uid: selectedInputUID, peak: peak, deviceName: selectedDeviceName)
+        guard abs(newMax - graphMaxRMS) > 0.000_001 else { return }
+        graphMaxRMS = newMax
+        if triggerThresholdRMS > graphMaxRMS {
+            triggerThresholdRMS = graphMaxRMS
+        }
+    }
+
     func stopMonitoring() {
         cancelAutomation()
+        passThrough.stop()
         captureQueue.async { [weak self] in
             self?.tearDownCaptureSession()
         }
@@ -97,20 +174,11 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
         awaitingRearm = false
         peakHoldRMS = 0
         peakRMS = 0
+        refreshInputDevices()
 
-        guard let deviceID = AudioDeviceHelper.findInputDevice(named: Self.targetDeviceName) else {
-            let available = AudioDeviceHelper.inputDevices().map(\.name).joined(separator: ", ")
-            statusMessage = "Device \"\(Self.targetDeviceName)\" not found. Available inputs: \(available.isEmpty ? "none" : available)"
-            return
-        }
-
-        guard let deviceUID = AudioDeviceHelper.deviceUID(deviceID) else {
-            statusMessage = "Could not read UID for \"\(Self.targetDeviceName)\""
-            return
-        }
-
-        guard let captureDevice = AVCaptureDevice(uniqueID: deviceUID) else {
-            statusMessage = "AVCaptureDevice could not find \"\(Self.targetDeviceName)\" (uid: \(deviceUID))"
+        guard !selectedInputUID.isEmpty,
+              let captureDevice = AVCaptureDevice(uniqueID: selectedInputUID) else {
+            statusMessage = "No audio input selected"
             return
         }
 
@@ -129,7 +197,7 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
             do {
                 let input = try AVCaptureDeviceInput(device: captureDevice)
                 guard session.canAddInput(input) else {
-                    setupError = "Could not add input \"\(Self.targetDeviceName)\""
+                    setupError = "Could not add input \"\(captureDevice.localizedName)\""
                     session.commitConfiguration()
                     self.reportStartResult(error: setupError)
                     return
@@ -158,6 +226,22 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
         }
     }
 
+    private func updatePassThrough() {
+        passThrough.stop()
+
+        guard passThroughEnabled, !selectedInputUID.isEmpty else { return }
+
+        do {
+            try passThrough.start(deviceUID: selectedInputUID)
+            if isRunning {
+                statusMessage = "Listening to \"\(selectedDeviceName ?? "input")\" · pass-through on"
+            }
+        } catch {
+            passThroughEnabled = false
+            statusMessage = "Pass-through failed: \(error.localizedDescription)"
+        }
+    }
+
     nonisolated private func reportStartResult(error: String?) {
         Task { @MainActor [weak self] in
             guard let self else { return }
@@ -168,9 +252,14 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
             }
 
             self.isRunning = self.captureSession.isRunning
-            self.statusMessage = self.isRunning
-                ? "Listening to \"\(Self.targetDeviceName)\""
-                : "Capture session failed to start"
+            if self.isRunning {
+                self.updatePassThrough()
+                if !self.passThroughEnabled {
+                    self.statusMessage = "Listening to \"\(self.selectedDeviceName ?? "input")\""
+                }
+            } else {
+                self.statusMessage = "Capture session failed to start"
+            }
         }
     }
 
@@ -184,6 +273,7 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
                 peakHoldRMS = clamped
                 peakHoldUntil = Date().addingTimeInterval(1.2)
                 peakRMS = clamped
+                updateGraphScale(with: clamped)
             }
 
             var history = levelHistory
@@ -199,7 +289,7 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
     private func updateRearmState(rms: Float) {
         guard awaitingRearm, !isExecutingAutomation else { return }
 
-        let rearmLevel = Self.triggerThresholdRMS * Self.rearmThresholdFraction
+        let rearmLevel = triggerThresholdRMS * Self.rearmThresholdFraction
         guard rms < rearmLevel else { return }
 
         awaitingRearm = false
@@ -208,14 +298,14 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
 
     private func checkThreshold(rms: Float) {
         guard isRunning, isArmed, !awaitingRearm, !isExecutingAutomation else { return }
-        guard rms >= Self.triggerThresholdRMS else { return }
+        guard rms >= triggerThresholdRMS else { return }
 
         isArmed = false
         awaitingRearm = true
         isExecutingAutomation = true
         statusMessage = String(
-            format: "Threshold reached (≥ %.1f dB), sending first `…",
-            Self.triggerThresholdDB
+            format: "Threshold reached (≥ %.2f%%), sending first `…",
+            triggerThresholdRMS * 100
         )
 
         automationTask = Task { [weak self] in
