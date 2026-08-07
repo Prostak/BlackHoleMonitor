@@ -145,6 +145,9 @@ struct ContentView: View {
             Text(monitor.statusMessage)
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                .textSelection(.enabled)
+                .lineLimit(3)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 

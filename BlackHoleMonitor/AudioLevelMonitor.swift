@@ -45,8 +45,19 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
     }
 
     private let captureSession = AVCaptureSession()
-    private let passThrough = AudioPassThrough()
+    private nonisolated(unsafe) let passThrough = AudioPassThrough()
     private let captureQueue = DispatchQueue(label: "com.blackholemonitor.capture", qos: .userInteractive)
+
+    override init() {
+        super.init()
+        passThrough.onError = { [weak self] error in
+            Task { @MainActor in
+                guard let self else { return }
+                self.passThroughEnabled = false
+                self.statusMessage = "Pass-through failed: \(AudioErrorFormatting.describe(error))"
+            }
+        }
+    }
     private var peakHoldRMS: Float = 0
     private var peakHoldUntil: Date = .distantPast
     private var isExecutingAutomation = false
@@ -229,16 +240,16 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
     private func updatePassThrough() {
         passThrough.stop()
 
-        guard passThroughEnabled, !selectedInputUID.isEmpty else { return }
+        guard passThroughEnabled else { return }
 
         do {
-            try passThrough.start(deviceUID: selectedInputUID)
+            try passThrough.start()
             if isRunning {
                 statusMessage = "Listening to \"\(selectedDeviceName ?? "input")\" · pass-through on"
             }
         } catch {
             passThroughEnabled = false
-            statusMessage = "Pass-through failed: \(error.localizedDescription)"
+            statusMessage = "Pass-through failed: \(AudioErrorFormatting.describe(error))"
         }
     }
 
@@ -369,11 +380,11 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
         20 * log10(max(rms, 0.000_000_1))
     }
 
-    nonisolated private static func computeRMS(from sampleBuffer: CMSampleBuffer) -> Float {
+    nonisolated private static func pcmBuffer(from sampleBuffer: CMSampleBuffer) -> AVAudioPCMBuffer? {
         guard CMSampleBufferGetNumSamples(sampleBuffer) > 0,
               let formatDescription = CMSampleBufferGetFormatDescription(sampleBuffer),
               let streamDescription = CMAudioFormatDescriptionGetStreamBasicDescription(formatDescription) else {
-            return 0
+            return nil
         }
 
         let format = AVAudioFormat(streamDescription: streamDescription)
@@ -383,7 +394,7 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
                   pcmFormat: format,
                   frameCapacity: AVAudioFrameCount(frameCount)
               ) else {
-            return 0
+            return nil
         }
 
         pcmBuffer.frameLength = AVAudioFrameCount(frameCount)
@@ -394,9 +405,14 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
             into: pcmBuffer.mutableAudioBufferList
         )
         guard copyStatus == noErr else {
-            return 0
+            return nil
         }
 
+        return pcmBuffer
+    }
+
+    nonisolated private static func computeRMS(from sampleBuffer: CMSampleBuffer) -> Float {
+        guard let pcmBuffer = pcmBuffer(from: sampleBuffer) else { return 0 }
         return computeRMS(from: pcmBuffer)
     }
 
@@ -455,6 +471,9 @@ extension AudioLevelMonitor: AVCaptureAudioDataOutputSampleBufferDelegate {
         from connection: AVCaptureConnection
     ) {
         let rms = Self.computeRMS(from: sampleBuffer)
+        if passThrough.acceptsBuffers, let pcmBuffer = Self.pcmBuffer(from: sampleBuffer) {
+            passThrough.enqueue(pcmBuffer)
+        }
         Task { @MainActor [weak self] in
             self?.applyLevel(rms: rms)
         }
