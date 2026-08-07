@@ -15,21 +15,31 @@ macOS-приложение для мониторинга уровня аудио
 - Xcode 15+
 - Установленный [BlackHole 2ch](https://existential.audio/blackhole/)
 
-## Сборка и запуск
+## Сборка и установка (рекомендуется)
+
+Чтобы **Accessibility** не сбрасывался при каждой пересборке, установите постоянную копию в `~/Applications`:
+
+```bash
+cd ~/Projects/BlackHoleMonitor
+chmod +x scripts/install.sh
+./scripts/install.sh
+open ~/Applications/BlackHoleMonitor.app
+```
+
+Один раз выдайте разрешения для **этой** копии:
+- **Microphone** — при первом запуске
+- **Accessibility** — System Settings → Privacy & Security → Accessibility → **BlackHoleMonitor**
+
+Дальше запускайте только `~/Applications/BlackHoleMonitor.app`, а не ⌘R в Xcode. После изменений в коде снова запустите `./scripts/install.sh`.
+
+## Разработка в Xcode
 
 ```bash
 cd ~/Projects/BlackHoleMonitor
 open BlackHoleMonitor.xcodeproj
 ```
 
-В Xcode нажмите **Run** (⌘R). При первом запуске macOS попросит разрешить доступ к микрофону — это нужно для мониторинга аудио входа (BlackHole считается входным устройством).
-
-Или из терминала:
-
-```bash
-xcodebuild -project BlackHoleMonitor.xcodeproj -scheme BlackHoleMonitor -configuration Debug build
-open ~/Library/Developer/Xcode/DerivedData/BlackHoleMonitor-*/Build/Products/Debug/BlackHoleMonitor.app
-```
+⌘R удобен для отладки, но путь к `.app` в DerivedData меняется — macOS может снова спрашивать Accessibility.
 
 ## Использование
 

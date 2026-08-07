@@ -12,6 +12,7 @@
 		A10000010000000000000003 /* AudioLevelMonitor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000020000000000000003 /* AudioLevelMonitor.swift */; };
 		A10000010000000000000004 /* AudioDeviceHelper.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000020000000000000004 /* AudioDeviceHelper.swift */; };
 		A10000010000000000000005 /* LevelGraphView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000020000000000000005 /* LevelGraphView.swift */; };
+		A10000010000000000000006 /* ScreenSharingAutomation.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000020000000000000008 /* ScreenSharingAutomation.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -20,6 +21,7 @@
 		A10000020000000000000003 /* AudioLevelMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioLevelMonitor.swift; sourceTree = "<group>"; };
 		A10000020000000000000004 /* AudioDeviceHelper.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioDeviceHelper.swift; sourceTree = "<group>"; };
 		A10000020000000000000005 /* LevelGraphView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LevelGraphView.swift; sourceTree = "<group>"; };
+		A10000020000000000000008 /* ScreenSharingAutomation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenSharingAutomation.swift; sourceTree = "<group>"; };
 		A10000020000000000000006 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A10000020000000000000007 /* BlackHoleMonitor.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = BlackHoleMonitor.entitlements; sourceTree = "<group>"; };
 		A10000030000000000000001 /* BlackHoleMonitor.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = BlackHoleMonitor.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -52,6 +54,7 @@
 				A10000020000000000000003 /* AudioLevelMonitor.swift */,
 				A10000020000000000000004 /* AudioDeviceHelper.swift */,
 				A10000020000000000000005 /* LevelGraphView.swift */,
+				A10000020000000000000008 /* ScreenSharingAutomation.swift */,
 				A10000020000000000000006 /* Info.plist */,
 				A10000020000000000000007 /* BlackHoleMonitor.entitlements */,
 			);
@@ -139,6 +142,7 @@
 				A10000010000000000000003 /* AudioLevelMonitor.swift in Sources */,
 				A10000010000000000000004 /* AudioDeviceHelper.swift in Sources */,
 				A10000010000000000000005 /* LevelGraphView.swift in Sources */,
+				A10000010000000000000006 /* ScreenSharingAutomation.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

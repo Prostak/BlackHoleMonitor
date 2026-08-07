@@ -63,7 +63,7 @@ struct ContentView: View {
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
             Text(String(
-                format: "Auto-stop at %.1f dB (%.2f%% amplitude)",
+                format: "Trigger at %.1f dB (%.2f%% amplitude) → Screen Sharing",
                 AudioLevelMonitor.triggerThresholdDB,
                 triggerPercent
             ))

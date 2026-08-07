@@ -28,6 +28,8 @@
 	<string>Copyright © 2026</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>This app needs microphone access to monitor audio levels from BlackHole 2ch.</string>
+	<key>NSAccessibilityUsageDescription</key>
+	<string>This app needs Accessibility access to send keystrokes to Screen Sharing when the audio threshold is reached.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 </dict>

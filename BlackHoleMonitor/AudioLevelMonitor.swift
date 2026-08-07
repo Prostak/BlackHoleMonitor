@@ -11,6 +11,7 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
     static let referencePeakDB: Float = -28
     static let triggerThresholdScale: Float = 0.72
     static let triggerDelaySeconds: TimeInterval = 0.5
+    static let rearmThresholdFraction: Float = 0.5
 
     static var triggerThresholdRMS: Float { rms(fromDB: referencePeakDB) * triggerThresholdScale }
     static var triggerThresholdDB: Float { db(fromRMS: triggerThresholdRMS) }
@@ -27,8 +28,10 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
     private let captureQueue = DispatchQueue(label: "com.blackholemonitor.capture", qos: .userInteractive)
     private var peakHoldRMS: Float = 0
     private var peakHoldUntil: Date = .distantPast
-    private var thresholdTriggered = false
-    private var autoStopTask: Task<Void, Never>?
+    private var isExecutingAutomation = false
+    private var isArmed = true
+    private var awaitingRearm = false
+    private var automationTask: Task<Void, Never>?
 
     func requestPermissionAndStart() {
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
@@ -56,14 +59,12 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
     }
 
     func stopMonitoring() {
-        cancelAutoStop()
+        cancelAutomation()
         captureQueue.async { [weak self] in
             self?.tearDownCaptureSession()
         }
         isRunning = false
-        if !statusMessage.hasPrefix("Stopped (threshold") {
-            statusMessage = "Stopped"
-        }
+        statusMessage = "Stopped"
     }
 
     func openSystemSettings() {
@@ -90,8 +91,10 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
     }
 
     private func startMonitoring() {
-        cancelAutoStop()
-        thresholdTriggered = false
+        cancelAutomation()
+        isExecutingAutomation = false
+        isArmed = true
+        awaitingRearm = false
         peakHoldRMS = 0
         peakRMS = 0
 
@@ -173,46 +176,99 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
 
     private func applyLevel(rms: Float) {
         let clamped = max(0, min(1, rms))
-        levelRMS = clamped
 
-        if clamped > peakHoldRMS || Date() >= peakHoldUntil {
-            peakHoldRMS = clamped
-            peakHoldUntil = Date().addingTimeInterval(1.2)
-            peakRMS = clamped
+        if !isExecutingAutomation {
+            levelRMS = clamped
+
+            if clamped > peakHoldRMS || Date() >= peakHoldUntil {
+                peakHoldRMS = clamped
+                peakHoldUntil = Date().addingTimeInterval(1.2)
+                peakRMS = clamped
+            }
+
+            var history = levelHistory
+            history.removeFirst()
+            history.append(clamped)
+            levelHistory = history
         }
 
-        var history = levelHistory
-        history.removeFirst()
-        history.append(clamped)
-        levelHistory = history
-
+        updateRearmState(rms: clamped)
         checkThreshold(rms: clamped)
     }
 
+    private func updateRearmState(rms: Float) {
+        guard awaitingRearm, !isExecutingAutomation else { return }
+
+        let rearmLevel = Self.triggerThresholdRMS * Self.rearmThresholdFraction
+        guard rms < rearmLevel else { return }
+
+        awaitingRearm = false
+        isArmed = true
+    }
+
     private func checkThreshold(rms: Float) {
-        guard isRunning, !thresholdTriggered else { return }
+        guard isRunning, isArmed, !awaitingRearm, !isExecutingAutomation else { return }
         guard rms >= Self.triggerThresholdRMS else { return }
 
-        thresholdTriggered = true
+        isArmed = false
+        awaitingRearm = true
+        isExecutingAutomation = true
         statusMessage = String(
-            format: "Threshold reached (≥ %.1f dB), stopping in 0.5s…",
+            format: "Threshold reached (≥ %.1f dB), sending first `…",
             Self.triggerThresholdDB
         )
 
-        autoStopTask = Task { @MainActor [weak self] in
+        automationTask = Task { [weak self] in
+            guard let self else { return }
+
             try? await Task.sleep(for: .seconds(Self.triggerDelaySeconds))
-            guard let self, !Task.isCancelled else { return }
-            self.stopMonitoring()
-            self.statusMessage = String(
-                format: "Stopped (threshold %.1f dB reached)",
-                Self.triggerThresholdDB
-            )
+            guard !Task.isCancelled else { return }
+            let stillRunning = await MainActor.run { self.isRunning }
+            guard stillRunning else { return }
+
+            let firstSent = await ScreenSharingAutomation.focusAndTypeBacktick()
+            guard !Task.isCancelled else { return }
+
+            if !firstSent {
+                await MainActor.run {
+                    self.isExecutingAutomation = false
+                    self.statusMessage = "Screen Sharing automation failed (first `)"
+                }
+                await ScreenSharingAutomation.activateSelf()
+                return
+            }
+
+            let delay = ScreenSharingAutomation.secondBacktickDelay()
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled else { return }
+
+            let secondSent = await ScreenSharingAutomation.refocusWaitAndTypeSecondBacktick()
+            if !secondSent {
+                await MainActor.run {
+                    self.isExecutingAutomation = false
+                    self.statusMessage = "Screen Sharing automation failed (second `)"
+                }
+                await ScreenSharingAutomation.activateSelf()
+                return
+            }
+
+            try? await Task.sleep(for: .seconds(ScreenSharingAutomation.postSecondKeyReturnDelaySeconds))
+            await ScreenSharingAutomation.activateSelf()
+
+            await MainActor.run {
+                self.isExecutingAutomation = false
+                if secondSent {
+                    self.statusMessage = "Waiting for next sound trigger…"
+                } else {
+                    self.statusMessage = "Screen Sharing automation failed (second `)"
+                }
+            }
         }
     }
 
-    private func cancelAutoStop() {
-        autoStopTask?.cancel()
-        autoStopTask = nil
+    private func cancelAutomation() {
+        automationTask?.cancel()
+        automationTask = nil
     }
 
     nonisolated static func rms(fromDB db: Float) -> Float {
