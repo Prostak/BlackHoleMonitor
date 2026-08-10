@@ -27,22 +27,10 @@ struct ContentView: View {
             }
             .frame(height: 180)
 
-            HStack {
+            HStack(alignment: .center) {
                 statusIndicator
                 Spacer()
-                if !monitor.permissionGranted {
-                    Button("Open Settings") {
-                        monitor.openSystemSettings()
-                    }
-                }
-                Button(monitor.isRunning ? "Stop" : "Start") {
-                    if monitor.isRunning {
-                        monitor.stopMonitoring()
-                    } else {
-                        monitor.requestPermissionAndStart()
-                    }
-                }
-                .keyboardShortcut(.defaultAction)
+                controlButtons
             }
         }
         .padding(20)
@@ -99,6 +87,38 @@ struct ContentView: View {
 
             Toggle("Pass-through to speakers", isOn: $monitor.passThroughEnabled)
                 .toggleStyle(.switch)
+
+            Toggle("Local beep instead of Screen Sharing", isOn: Binding(
+                get: { monitor.triggerResponseMode == .localBeep },
+                set: { monitor.triggerResponseMode = $0 ? .localBeep : .screenSharing }
+            ))
+            .toggleStyle(.switch)
+        }
+    }
+
+    private var controlButtons: some View {
+        HStack(spacing: 8) {
+            if !monitor.permissionGranted {
+                Button("Open Settings") {
+                    monitor.openSystemSettings()
+                }
+            }
+            Button("Start") {
+                monitor.requestPermissionAndStart()
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.green)
+            .disabled(monitor.isRunning)
+            .opacity(monitor.isRunning ? 0.35 : 1)
+            .keyboardShortcut(.defaultAction)
+
+            Button("Stop") {
+                monitor.stopMonitoring()
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.red)
+            .disabled(!monitor.isRunning)
+            .opacity(monitor.isRunning ? 1 : 0.35)
         }
     }
 

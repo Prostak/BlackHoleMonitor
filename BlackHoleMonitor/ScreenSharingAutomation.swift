@@ -10,6 +10,7 @@ enum ScreenSharingAutomation {
     static let layoutSwitchDelaySeconds: TimeInterval = 0.05
     static let secondFocusSettleDelaySeconds: TimeInterval = 0.5
     static let postSecondKeyReturnDelaySeconds: TimeInterval = 0.5
+    static let keepaliveSettleDelaySeconds: TimeInterval = 0.5
     static let secondBacktickBaseDelaySeconds: TimeInterval = 1.15
     static let secondBacktickOffsetMinimum: TimeInterval = -0.21
     static let secondBacktickOffsetMaximum: TimeInterval = 1.2
@@ -30,6 +31,23 @@ enum ScreenSharingAutomation {
     @discardableResult
     static func typeBacktick() async -> Bool {
         await sendBacktick()
+    }
+
+    @discardableResult
+    static func focusWaitTypeBacktickAndReturn() async -> Bool {
+        guard await ensureScreenSharingFocused() else {
+            return false
+        }
+
+        try? await Task.sleep(for: .seconds(activationDelaySeconds))
+        guard await sendBacktick() else {
+            await activateSelf()
+            return false
+        }
+
+        try? await Task.sleep(for: .seconds(keepaliveSettleDelaySeconds))
+        await activateSelf()
+        return true
     }
 
     @discardableResult

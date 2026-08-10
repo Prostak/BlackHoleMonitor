@@ -15,6 +15,7 @@
 		A10000010000000000000006 /* ScreenSharingAutomation.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000020000000000000008 /* ScreenSharingAutomation.swift */; };
 		A10000010000000000000007 /* AudioPassThrough.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000020000000000000009 /* AudioPassThrough.swift */; };
 		A10000010000000000000008 /* ThresholdStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000020000000000000010 /* ThresholdStore.swift */; };
+		A10000010000000000000009 /* TriggerBeep.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000020000000000000011 /* TriggerBeep.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -26,6 +27,7 @@
 		A10000020000000000000008 /* ScreenSharingAutomation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ScreenSharingAutomation.swift; sourceTree = "<group>"; };
 		A10000020000000000000009 /* AudioPassThrough.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioPassThrough.swift; sourceTree = "<group>"; };
 		A10000020000000000000010 /* ThresholdStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThresholdStore.swift; sourceTree = "<group>"; };
+		A10000020000000000000011 /* TriggerBeep.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TriggerBeep.swift; sourceTree = "<group>"; };
 		A10000020000000000000006 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A10000020000000000000007 /* BlackHoleMonitor.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = BlackHoleMonitor.entitlements; sourceTree = "<group>"; };
 		A10000030000000000000001 /* BlackHoleMonitor.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = BlackHoleMonitor.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -61,6 +63,7 @@
 				A10000020000000000000008 /* ScreenSharingAutomation.swift */,
 				A10000020000000000000009 /* AudioPassThrough.swift */,
 				A10000020000000000000010 /* ThresholdStore.swift */,
+				A10000020000000000000011 /* TriggerBeep.swift */,
 				A10000020000000000000006 /* Info.plist */,
 				A10000020000000000000007 /* BlackHoleMonitor.entitlements */,
 			);
@@ -151,6 +154,7 @@
 				A10000010000000000000006 /* ScreenSharingAutomation.swift in Sources */,
 				A10000010000000000000007 /* AudioPassThrough.swift in Sources */,
 				A10000010000000000000008 /* ThresholdStore.swift in Sources */,
+				A10000010000000000000009 /* TriggerBeep.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

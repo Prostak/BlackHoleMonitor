@@ -10,12 +10,27 @@ struct AudioInputOption: Identifiable, Hashable {
     var id: String { uid }
 }
 
+enum TriggerResponseMode: String, CaseIterable, Identifiable {
+    case screenSharing
+    case localBeep
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .screenSharing: "Send ` to Screen Sharing"
+        case .localBeep: "Local beep only"
+        }
+    }
+}
+
 @MainActor
 final class AudioLevelMonitor: NSObject, ObservableObject {
     static let defaultDeviceName = "BlackHole 2ch"
     static let historyCapacity = 240
     static let absoluteGraphMaxRMS: Float = GraphScaleStore.absoluteGraphMax
     static let triggerDelaySeconds: TimeInterval = 0.5
+    static let keepaliveIntervalSeconds: TimeInterval = 30
     static let rearmThresholdFraction: Float = 0.5
     static let minimumTriggerRMS: Float = 0.001
 
@@ -43,6 +58,22 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
             updatePassThrough()
         }
     }
+    @Published var triggerResponseMode: TriggerResponseMode = {
+        TriggerResponseMode(
+            rawValue: UserDefaults.standard.string(forKey: "triggerResponseMode") ?? ""
+        ) ?? .screenSharing
+    }() {
+        didSet {
+            guard oldValue != triggerResponseMode else { return }
+            UserDefaults.standard.set(triggerResponseMode.rawValue, forKey: Self.triggerResponseModeKey)
+            updateKeepaliveMonitoring()
+            if isRunning, !passThroughEnabled {
+                statusMessage = listeningStatusMessage()
+            }
+        }
+    }
+
+    private static let triggerResponseModeKey = "triggerResponseMode"
 
     private let captureSession = AVCaptureSession()
     private nonisolated(unsafe) let passThrough = AudioPassThrough()
@@ -64,6 +95,7 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
     private var isArmed = true
     private var awaitingRearm = false
     private var automationTask: Task<Void, Never>?
+    private var keepaliveTask: Task<Void, Never>?
     private var isLoadingThreshold = false
 
     func requestPermissionAndStart() {
@@ -147,6 +179,7 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
 
     func stopMonitoring() {
         cancelAutomation()
+        stopKeepaliveMonitoring()
         passThrough.stop()
         captureQueue.async { [weak self] in
             self?.tearDownCaptureSession()
@@ -245,7 +278,7 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
         do {
             try passThrough.start()
             if isRunning {
-                statusMessage = "Listening to \"\(selectedDeviceName ?? "input")\" · pass-through on"
+                statusMessage = "\(listeningStatusMessage()) · pass-through on"
             }
         } catch {
             passThroughEnabled = false
@@ -265,8 +298,9 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
             self.isRunning = self.captureSession.isRunning
             if self.isRunning {
                 self.updatePassThrough()
+                self.updateKeepaliveMonitoring()
                 if !self.passThroughEnabled {
-                    self.statusMessage = "Listening to \"\(self.selectedDeviceName ?? "input")\""
+                    self.statusMessage = self.listeningStatusMessage()
                 }
             } else {
                 self.statusMessage = "Capture session failed to start"
@@ -305,6 +339,7 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
 
         awaitingRearm = false
         isArmed = true
+        updateKeepaliveMonitoring()
     }
 
     private func checkThreshold(rms: Float) {
@@ -314,6 +349,26 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
         isArmed = false
         awaitingRearm = true
         isExecutingAutomation = true
+
+        switch triggerResponseMode {
+        case .screenSharing:
+            handleScreenSharingTrigger()
+        case .localBeep:
+            handleLocalBeepTrigger()
+        }
+    }
+
+    private func handleLocalBeepTrigger() {
+        statusMessage = String(
+            format: "Threshold reached (≥ %.2f%%), playing beep…",
+            triggerThresholdRMS * 100
+        )
+        TriggerBeep.shared.play(amplitude: triggerThresholdRMS)
+        isExecutingAutomation = false
+        statusMessage = waitingStatusMessage()
+    }
+
+    private func handleScreenSharingTrigger() {
         statusMessage = String(
             format: "Threshold reached (≥ %.2f%%), sending first `…",
             triggerThresholdRMS * 100
@@ -358,12 +413,67 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
 
             await MainActor.run {
                 self.isExecutingAutomation = false
-                if secondSent {
-                    self.statusMessage = "Waiting for next sound trigger…"
-                } else {
-                    self.statusMessage = "Screen Sharing automation failed (second `)"
+                self.statusMessage = self.waitingStatusMessage()
+            }
+        }
+    }
+
+    private func updateKeepaliveMonitoring() {
+        stopKeepaliveMonitoring()
+        guard isRunning, triggerResponseMode == .screenSharing else { return }
+
+        keepaliveTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(Self.keepaliveIntervalSeconds))
+                guard !Task.isCancelled else { return }
+
+                let shouldSend = await MainActor.run { () -> Bool in
+                    guard let self else { return false }
+                    return self.isRunning
+                        && self.triggerResponseMode == .screenSharing
+                        && !self.isExecutingAutomation
+                }
+                guard shouldSend else { continue }
+
+                await MainActor.run {
+                    self?.isExecutingAutomation = true
+                    self?.statusMessage = "Keepalive: sending ` to Screen Sharing…"
+                }
+
+                let sent = await ScreenSharingAutomation.focusWaitTypeBacktickAndReturn()
+
+                await MainActor.run {
+                    guard let self else { return }
+                    self.isExecutingAutomation = false
+                    self.statusMessage = sent
+                        ? self.waitingStatusMessage()
+                        : "Keepalive failed: could not send `"
                 }
             }
+        }
+    }
+
+    private func stopKeepaliveMonitoring() {
+        keepaliveTask?.cancel()
+        keepaliveTask = nil
+    }
+
+    private func listeningStatusMessage() -> String {
+        let device = selectedDeviceName ?? "input"
+        switch triggerResponseMode {
+        case .screenSharing:
+            return "Listening to \"\(device)\""
+        case .localBeep:
+            return "Listening to \"\(device)\" · local beep mode"
+        }
+    }
+
+    private func waitingStatusMessage() -> String {
+        switch triggerResponseMode {
+        case .screenSharing:
+            return "Waiting for next sound trigger…"
+        case .localBeep:
+            return "Waiting for next sound trigger (local beep)…"
         }
     }
 

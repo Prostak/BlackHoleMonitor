@@ -7,7 +7,9 @@ final class AudioPassThrough {
     private let queue = DispatchQueue(label: "com.blackholemonitor.passthrough", qos: .userInteractive)
     private var isEnabled = false
     private var isConfigured = false
-    private var configuredFormat: AVAudioFormat?
+    private var sourceFormat: AVAudioFormat?
+    private var playbackFormat: AVAudioFormat?
+    private var converter: AVAudioConverter?
     private let maxScheduledBuffers = 4
     private var scheduledBufferCount = 0
     nonisolated(unsafe) private(set) var acceptsBuffers = false
@@ -37,8 +39,7 @@ final class AudioPassThrough {
                 engine.detach(playerNode)
             }
             engine.reset()
-            isConfigured = false
-            configuredFormat = nil
+            resetConfiguration()
         }
     }
 
@@ -59,51 +60,139 @@ final class AudioPassThrough {
                 return
             }
 
+            let playbackBuffer = try makePlaybackBuffer(from: buffer)
+
             if !engine.isRunning {
                 try engine.start()
                 playerNode.play()
             }
 
             scheduledBufferCount += 1
-            playerNode.scheduleBuffer(buffer, at: nil, options: []) { [weak self] in
+            playerNode.scheduleBuffer(playbackBuffer, at: nil, options: []) { [weak self] in
                 self?.queue.async {
                     self?.scheduledBufferCount = max(0, (self?.scheduledBufferCount ?? 1) - 1)
                 }
             }
         } catch {
-            isEnabled = false
-            onError?(error)
+            disableWithError(error)
         }
     }
 
-    private func configureIfNeeded(format: AVAudioFormat) throws {
-        guard !isConfigured else {
-            if configuredFormat != format {
+    private func configureIfNeeded(format inputFormat: AVAudioFormat) throws {
+        if isConfigured {
+            guard formatsCompatible(sourceFormat, inputFormat) else {
                 throw PassThroughError.formatChanged
             }
             return
         }
 
-        guard format.channelCount > 0, format.sampleRate > 0 else {
+        guard inputFormat.channelCount > 0, inputFormat.sampleRate > 0 else {
             throw PassThroughError.noInputChannels
         }
 
         engine.attach(playerNode)
-        engine.connect(playerNode, to: engine.mainMixerNode, format: format)
+        engine.connect(playerNode, to: engine.mainMixerNode, format: nil)
         engine.connect(engine.mainMixerNode, to: engine.outputNode, format: nil)
         engine.prepare()
+
+        let mixerInputFormat = engine.mainMixerNode.inputFormat(forBus: 0)
+        guard mixerInputFormat.channelCount > 0, mixerInputFormat.sampleRate > 0 else {
+            throw PassThroughError.noInputChannels
+        }
+
+        playbackFormat = mixerInputFormat
+        sourceFormat = inputFormat
+
+        if formatsCompatible(inputFormat, mixerInputFormat) {
+            converter = nil
+        } else {
+            guard let audioConverter = AVAudioConverter(from: inputFormat, to: mixerInputFormat) else {
+                throw PassThroughError.unsupportedFormat
+            }
+            converter = audioConverter
+        }
+
         isConfigured = true
-        configuredFormat = format
+    }
+
+    private func makePlaybackBuffer(from buffer: AVAudioPCMBuffer) throws -> AVAudioPCMBuffer {
+        guard let converter, let playbackFormat else {
+            return copyBuffer(buffer)
+        }
+
+        let ratio = playbackFormat.sampleRate / buffer.format.sampleRate
+        let frameCapacity = AVAudioFrameCount(ceil(Double(buffer.frameLength) * ratio))
+        guard let output = AVAudioPCMBuffer(pcmFormat: playbackFormat, frameCapacity: frameCapacity) else {
+            throw PassThroughError.unsupportedFormat
+        }
+
+        var consumedInput = false
+        var conversionError: NSError?
+        let inputBlock: AVAudioConverterInputBlock = { _, outStatus in
+            if consumedInput {
+                outStatus.pointee = .noDataNow
+                return nil
+            }
+            consumedInput = true
+            outStatus.pointee = .haveData
+            return buffer
+        }
+
+        let status = converter.convert(to: output, error: &conversionError, withInputFrom: inputBlock)
+        if status == .error || conversionError != nil {
+            throw PassThroughError.unsupportedFormat
+        }
+
+        return output
+    }
+
+    private func copyBuffer(_ buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer {
+        guard let copy = AVAudioPCMBuffer(pcmFormat: buffer.format, frameCapacity: buffer.frameCapacity) else {
+            return buffer
+        }
+        copy.frameLength = buffer.frameLength
+
+        let channels = Int(buffer.format.channelCount)
+        if let floatData = buffer.floatChannelData, let copyData = copy.floatChannelData {
+            for channel in 0..<channels {
+                memcpy(copyData[channel], floatData[channel], Int(buffer.frameLength) * MemoryLayout<Float>.size)
+            }
+        }
+
+        return copy
+    }
+
+    private func disableWithError(_ error: Error) {
+        acceptsBuffers = false
+        isEnabled = false
+        onError?(error)
+    }
+
+    private func resetConfiguration() {
+        isConfigured = false
+        sourceFormat = nil
+        playbackFormat = nil
+        converter = nil
+    }
+
+    private func formatsCompatible(_ lhs: AVAudioFormat?, _ rhs: AVAudioFormat) -> Bool {
+        guard let lhs else { return false }
+        return lhs.sampleRate == rhs.sampleRate
+            && lhs.channelCount == rhs.channelCount
+            && lhs.commonFormat == rhs.commonFormat
+            && lhs.isInterleaved == rhs.isInterleaved
     }
 
     enum PassThroughError: LocalizedError {
         case noInputChannels
         case formatChanged
+        case unsupportedFormat
 
         var errorDescription: String? {
             switch self {
             case .noInputChannels: "Selected device has no input channels"
             case .formatChanged: "Capture audio format changed during pass-through"
+            case .unsupportedFormat: "Could not convert capture audio for pass-through"
             }
         }
     }
