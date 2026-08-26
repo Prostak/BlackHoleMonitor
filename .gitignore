@@ -1,0 +1,6 @@
+.DS_Store
+*.xcuserstate
+**/xcuserdata/
+BlackHoleMonitor.xcodeproj/project.xcworkspace/xcuserdata/
+.derivedData/
+Fish.m4a

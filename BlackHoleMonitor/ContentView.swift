@@ -88,11 +88,28 @@ struct ContentView: View {
             Toggle("Pass-through to speakers", isOn: $monitor.passThroughEnabled)
                 .toggleStyle(.switch)
 
-            Toggle("Local beep instead of Screen Sharing", isOn: Binding(
-                get: { monitor.triggerResponseMode == .localBeep },
-                set: { monitor.triggerResponseMode = $0 ? .localBeep : .screenSharing }
-            ))
-            .toggleStyle(.switch)
+            Picker("On trigger", selection: $monitor.triggerResponseMode) {
+                ForEach(TriggerResponseMode.allCases) { mode in
+                    Text(mode.label).tag(mode)
+                }
+            }
+
+            if monitor.triggerResponseMode == .serial {
+                HStack {
+                    Text("Serial")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    TextField(SerialPort.defaultPath, text: $monitor.serialPortPath)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(.caption, design: .monospaced))
+                    Button(monitor.serialConnected ? "Reconnect" : "Connect") {
+                        _ = monitor.reconnectSerial()
+                    }
+                    Circle()
+                        .fill(monitor.serialConnected ? Color.green : Color.orange)
+                        .frame(width: 8, height: 8)
+                }
+            }
         }
     }
 

@@ -12,6 +12,7 @@ struct AudioInputOption: Identifiable, Hashable {
 
 enum TriggerResponseMode: String, CaseIterable, Identifiable {
     case screenSharing
+    case serial
     case localBeep
 
     var id: String { rawValue }
@@ -19,6 +20,7 @@ enum TriggerResponseMode: String, CaseIterable, Identifiable {
     var label: String {
         switch self {
         case .screenSharing: "Send ` to Screen Sharing"
+        case .serial: "Send ` via serial (Pico)"
         case .localBeep: "Local beep only"
         }
     }
@@ -66,6 +68,7 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
         didSet {
             guard oldValue != triggerResponseMode else { return }
             UserDefaults.standard.set(triggerResponseMode.rawValue, forKey: Self.triggerResponseModeKey)
+            updateSerialConnectionForMode()
             updateKeepaliveMonitoring()
             if isRunning, !passThroughEnabled {
                 statusMessage = listeningStatusMessage()
@@ -73,10 +76,26 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
         }
     }
 
+    @Published var serialPortPath: String = {
+        UserDefaults.standard.string(forKey: "serialPortPath") ?? SerialPort.defaultPath
+    }() {
+        didSet {
+            guard oldValue != serialPortPath else { return }
+            UserDefaults.standard.set(serialPortPath, forKey: Self.serialPortPathKey)
+            if triggerResponseMode == .serial {
+                updateSerialConnectionForMode()
+            }
+        }
+    }
+
+    @Published private(set) var serialConnected = false
+
     private static let triggerResponseModeKey = "triggerResponseMode"
+    private static let serialPortPathKey = "serialPortPath"
 
     private let captureSession = AVCaptureSession()
     private nonisolated(unsafe) let passThrough = AudioPassThrough()
+    private let serialPort = SerialPort()
     private let captureQueue = DispatchQueue(label: "com.blackholemonitor.capture", qos: .userInteractive)
 
     override init() {
@@ -88,6 +107,7 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
                 self.statusMessage = "Pass-through failed: \(AudioErrorFormatting.describe(error))"
             }
         }
+        updateSerialConnectionForMode()
     }
     private var peakHoldRMS: Float = 0
     private var peakHoldUntil: Date = .distantPast
@@ -353,6 +373,8 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
         switch triggerResponseMode {
         case .screenSharing:
             handleScreenSharingTrigger()
+        case .serial:
+            handleSerialTrigger()
         case .localBeep:
             handleLocalBeepTrigger()
         }
@@ -366,6 +388,45 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
         TriggerBeep.shared.play(amplitude: triggerThresholdRMS)
         isExecutingAutomation = false
         statusMessage = waitingStatusMessage()
+    }
+
+    private func handleSerialTrigger() {
+        statusMessage = String(
+            format: "Threshold reached (≥ %.2f%%), sending first ` via serial…",
+            triggerThresholdRMS * 100
+        )
+
+        automationTask = Task { [weak self] in
+            guard let self else { return }
+
+            try? await Task.sleep(for: .seconds(Self.triggerDelaySeconds))
+            guard !Task.isCancelled else { return }
+            let stillRunning = await MainActor.run { self.isRunning }
+            guard stillRunning else { return }
+
+            let firstSent = await MainActor.run { self.sendBacktickViaSerial() }
+            guard !Task.isCancelled else { return }
+
+            if !firstSent {
+                await MainActor.run {
+                    self.isExecutingAutomation = false
+                    self.statusMessage = "Serial send failed (first `)"
+                }
+                return
+            }
+
+            let delay = ScreenSharingAutomation.secondBacktickDelay()
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled else { return }
+
+            let secondSent = await MainActor.run { self.sendBacktickViaSerial() }
+            await MainActor.run {
+                self.isExecutingAutomation = false
+                self.statusMessage = secondSent
+                    ? self.waitingStatusMessage()
+                    : "Serial send failed (second `)"
+            }
+        }
     }
 
     private func handleScreenSharingTrigger() {
@@ -420,36 +481,112 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
 
     private func updateKeepaliveMonitoring() {
         stopKeepaliveMonitoring()
-        guard isRunning, triggerResponseMode == .screenSharing else { return }
+        guard isRunning else { return }
+        guard triggerResponseMode == .screenSharing || triggerResponseMode == .serial else { return }
 
         keepaliveTask = Task { [weak self] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .seconds(Self.keepaliveIntervalSeconds))
                 guard !Task.isCancelled else { return }
 
-                let shouldSend = await MainActor.run { () -> Bool in
-                    guard let self else { return false }
-                    return self.isRunning
-                        && self.triggerResponseMode == .screenSharing
-                        && !self.isExecutingAutomation
+                let mode = await MainActor.run { () -> TriggerResponseMode? in
+                    guard let self else { return nil }
+                    guard self.isRunning, !self.isExecutingAutomation else { return nil }
+                    switch self.triggerResponseMode {
+                    case .screenSharing, .serial:
+                        return self.triggerResponseMode
+                    case .localBeep:
+                        return nil
+                    }
                 }
-                guard shouldSend else { continue }
+                guard let mode else { continue }
 
-                await MainActor.run {
-                    self?.isExecutingAutomation = true
-                    self?.statusMessage = "Keepalive: sending ` to Screen Sharing…"
-                }
+                switch mode {
+                case .screenSharing:
+                    await MainActor.run {
+                        self?.isExecutingAutomation = true
+                        self?.statusMessage = "Keepalive: sending ` to Screen Sharing…"
+                    }
 
-                let sent = await ScreenSharingAutomation.focusWaitTypeBacktickAndReturn()
+                    let sent = await ScreenSharingAutomation.focusWaitTypeBacktickAndReturn()
 
-                await MainActor.run {
-                    guard let self else { return }
-                    self.isExecutingAutomation = false
-                    self.statusMessage = sent
-                        ? self.waitingStatusMessage()
-                        : "Keepalive failed: could not send `"
+                    await MainActor.run {
+                        guard let self else { return }
+                        self.isExecutingAutomation = false
+                        self.statusMessage = sent
+                            ? self.waitingStatusMessage()
+                            : "Keepalive failed: could not send `"
+                    }
+
+                case .serial:
+                    await MainActor.run {
+                        guard let self else { return }
+                        self.isExecutingAutomation = true
+                        self.statusMessage = "Keepalive: sending ` via serial…"
+                        let sent = self.sendBacktickViaSerial()
+                        self.isExecutingAutomation = false
+                        self.statusMessage = sent
+                            ? self.waitingStatusMessage()
+                            : "Keepalive failed: serial send failed"
+                    }
+
+                case .localBeep:
+                    continue
                 }
             }
+        }
+    }
+
+    @discardableResult
+    func reconnectSerial() -> Bool {
+        guard triggerResponseMode == .serial else {
+            statusMessage = "Switch trigger mode to serial first"
+            return false
+        }
+        return openSerialPort()
+    }
+
+    private func updateSerialConnectionForMode() {
+        if triggerResponseMode == .serial {
+            _ = openSerialPort()
+        } else {
+            closeSerialPort()
+        }
+    }
+
+    @discardableResult
+    private func openSerialPort() -> Bool {
+        do {
+            try serialPort.open(path: serialPortPath)
+            serialConnected = true
+            statusMessage = "Serial connected: \(serialPortPath)"
+            return true
+        } catch {
+            serialConnected = false
+            statusMessage = "Serial connect failed: \(error.localizedDescription)"
+            return false
+        }
+    }
+
+    private func closeSerialPort() {
+        serialPort.close()
+        serialConnected = false
+    }
+
+    @discardableResult
+    private func sendBacktickViaSerial() -> Bool {
+        if !serialPort.isOpen {
+            guard openSerialPort() else { return false }
+        }
+
+        do {
+            try serialPort.writeBacktick()
+            serialConnected = true
+            return true
+        } catch {
+            serialConnected = false
+            statusMessage = "Serial send failed: \(error.localizedDescription)"
+            return false
         }
     }
 
@@ -463,6 +600,9 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
         switch triggerResponseMode {
         case .screenSharing:
             return "Listening to \"\(device)\""
+        case .serial:
+            let link = serialConnected ? "serial OK" : "serial offline"
+            return "Listening to \"\(device)\" · \(link)"
         case .localBeep:
             return "Listening to \"\(device)\" · local beep mode"
         }
@@ -472,6 +612,8 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
         switch triggerResponseMode {
         case .screenSharing:
             return "Waiting for next sound trigger…"
+        case .serial:
+            return "Waiting for next sound trigger (serial)…"
         case .localBeep:
             return "Waiting for next sound trigger (local beep)…"
         }
