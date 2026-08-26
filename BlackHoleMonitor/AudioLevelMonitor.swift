@@ -29,12 +29,14 @@ enum TriggerResponseMode: String, CaseIterable, Identifiable {
 @MainActor
 final class AudioLevelMonitor: NSObject, ObservableObject {
     static let defaultDeviceName = "BlackHole 2ch"
-    static let historyCapacity = 240
+    static let historyCapacity = 480
     static let absoluteGraphMaxRMS: Float = GraphScaleStore.absoluteGraphMax
     static let triggerDelaySeconds: TimeInterval = 0.5
     static let keepaliveIntervalSeconds: TimeInterval = 30
     static let rearmThresholdFraction: Float = 0.5
     static let minimumTriggerRMS: Float = 0.001
+    static let thresholdGraphFraction: Float = 1.0 / 3.0
+    static let postCastIgnoreSeconds: TimeInterval = 1.0
 
     var triggerThresholdDB: Float { Self.db(fromRMS: triggerThresholdRMS) }
 
@@ -117,6 +119,7 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
     private var automationTask: Task<Void, Never>?
     private var keepaliveTask: Task<Void, Never>?
     private var isLoadingThreshold = false
+    private var soundIgnoreUntil: Date = .distantPast
 
     func requestPermissionAndStart() {
         refreshInputDevices()
@@ -176,25 +179,39 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
         triggerThresholdRMS = min(max(rms, Self.minimumTriggerRMS), graphMaxRMS)
     }
 
+    /// Recalculate graph upper bound so the threshold line sits at 1/3 height.
+    func commitThresholdScale() {
+        let threshold = max(triggerThresholdRMS, Self.minimumTriggerRMS)
+        let newMax = min(
+            max(threshold / Self.thresholdGraphFraction, GraphScaleStore.minimumGraphMax),
+            GraphScaleStore.absoluteGraphMax
+        )
+        graphMaxRMS = newMax
+        triggerThresholdRMS = min(threshold, newMax)
+        if !selectedInputUID.isEmpty {
+            ThresholdStore.save(uid: selectedInputUID, rms: triggerThresholdRMS)
+            GraphScaleStore.save(uid: selectedInputUID, graphMaxRMS: graphMaxRMS)
+        }
+    }
+
     private func loadSettingsForCurrentInput() {
         guard !selectedInputUID.isEmpty else { return }
         isLoadingThreshold = true
-        graphMaxRMS = GraphScaleStore.graphMaxRMS(for: selectedInputUID, deviceName: selectedDeviceName)
-        triggerThresholdRMS = min(
-            ThresholdStore.threshold(for: selectedInputUID, deviceName: selectedDeviceName),
-            graphMaxRMS
+        let storedThreshold = ThresholdStore.threshold(for: selectedInputUID, deviceName: selectedDeviceName)
+        triggerThresholdRMS = max(storedThreshold, Self.minimumTriggerRMS)
+        let derivedMax = min(
+            max(triggerThresholdRMS / Self.thresholdGraphFraction, GraphScaleStore.minimumGraphMax),
+            GraphScaleStore.absoluteGraphMax
         )
+        graphMaxRMS = derivedMax
+        GraphScaleStore.save(uid: selectedInputUID, graphMaxRMS: graphMaxRMS)
         isLoadingThreshold = false
     }
 
     private func updateGraphScale(with peak: Float) {
-        guard !selectedInputUID.isEmpty else { return }
-        let newMax = GraphScaleStore.recordPeak(uid: selectedInputUID, peak: peak, deviceName: selectedDeviceName)
-        guard abs(newMax - graphMaxRMS) > 0.000_001 else { return }
-        graphMaxRMS = newMax
-        if triggerThresholdRMS > graphMaxRMS {
-            triggerThresholdRMS = graphMaxRMS
-        }
+        // Peak tracking is retained for diagnostics, but graph scale is owned by the threshold slider.
+        guard !selectedInputUID.isEmpty, peak > 0 else { return }
+        _ = GraphScaleStore.recordPeak(uid: selectedInputUID, peak: peak, deviceName: selectedDeviceName)
     }
 
     func stopMonitoring() {
@@ -236,8 +253,10 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
         isExecutingAutomation = false
         isArmed = true
         awaitingRearm = false
+        soundIgnoreUntil = .distantPast
         peakHoldRMS = 0
         peakRMS = 0
+        TriggerLog.reset()
         refreshInputDevices()
 
         guard !selectedInputUID.isEmpty,
@@ -364,6 +383,7 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
 
     private func checkThreshold(rms: Float) {
         guard isRunning, isArmed, !awaitingRearm, !isExecutingAutomation else { return }
+        guard Date() >= soundIgnoreUntil else { return }
         guard rms >= triggerThresholdRMS else { return }
 
         isArmed = false
@@ -380,11 +400,17 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
         }
     }
 
+    private func noteCast(reason: TriggerLogReason) {
+        TriggerLog.write(reason: reason)
+        soundIgnoreUntil = Date().addingTimeInterval(Self.postCastIgnoreSeconds)
+    }
+
     private func handleLocalBeepTrigger() {
         statusMessage = String(
             format: "Threshold reached (≥ %.2f%%), playing beep…",
             triggerThresholdRMS * 100
         )
+        noteCast(reason: .sound)
         TriggerBeep.shared.play(amplitude: triggerThresholdRMS)
         isExecutingAutomation = false
         statusMessage = waitingStatusMessage()
@@ -404,7 +430,10 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
             let stillRunning = await MainActor.run { self.isRunning }
             guard stillRunning else { return }
 
-            let firstSent = await MainActor.run { self.sendBacktickViaSerial() }
+            let firstSent = await MainActor.run {
+                self.noteCast(reason: .sound)
+                return self.sendBacktickViaSerial()
+            }
             guard !Task.isCancelled else { return }
 
             if !firstSent {
@@ -419,7 +448,10 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
             try? await Task.sleep(for: .seconds(delay))
             guard !Task.isCancelled else { return }
 
-            let secondSent = await MainActor.run { self.sendBacktickViaSerial() }
+            let secondSent = await MainActor.run {
+                self.noteCast(reason: .castWait)
+                return self.sendBacktickViaSerial()
+            }
             await MainActor.run {
                 self.isExecutingAutomation = false
                 self.statusMessage = secondSent
@@ -443,6 +475,7 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
             let stillRunning = await MainActor.run { self.isRunning }
             guard stillRunning else { return }
 
+            await MainActor.run { self.noteCast(reason: .sound) }
             let firstSent = await ScreenSharingAutomation.focusAndTypeBacktick()
             guard !Task.isCancelled else { return }
 
@@ -459,6 +492,7 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
             try? await Task.sleep(for: .seconds(delay))
             guard !Task.isCancelled else { return }
 
+            await MainActor.run { self.noteCast(reason: .castWait) }
             let secondSent = await ScreenSharingAutomation.refocusWaitAndTypeSecondBacktick()
             if !secondSent {
                 await MainActor.run {
@@ -506,6 +540,7 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
                     await MainActor.run {
                         self?.isExecutingAutomation = true
                         self?.statusMessage = "Keepalive: sending ` to Screen Sharing…"
+                        self?.noteCast(reason: .ping)
                     }
 
                     let sent = await ScreenSharingAutomation.focusWaitTypeBacktickAndReturn()
@@ -523,6 +558,7 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
                         guard let self else { return }
                         self.isExecutingAutomation = true
                         self.statusMessage = "Keepalive: sending ` via serial…"
+                        self.noteCast(reason: .ping)
                         let sent = self.sendBacktickViaSerial()
                         self.isExecutingAutomation = false
                         self.statusMessage = sent

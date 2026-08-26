@@ -84,6 +84,13 @@ enum GraphScaleStore {
         return max(target, minimumGraphMax)
     }
 
+    static func save(uid: String, graphMaxRMS: Float) {
+        guard !uid.isEmpty else { return }
+        var scaleDict = UserDefaults.standard.dictionary(forKey: scaleKey) ?? [:]
+        scaleDict[uid] = Double(graphMaxRMS)
+        UserDefaults.standard.set(scaleDict, forKey: scaleKey)
+    }
+
     @discardableResult
     static func recordPeak(uid: String, peak: Float, deviceName: String? = nil) -> Float {
         guard !uid.isEmpty, peak > 0 else { return graphMaxRMS(for: uid, deviceName: deviceName) }
@@ -98,9 +105,7 @@ enum GraphScaleStore {
         UserDefaults.standard.set(peakDict, forKey: peakKey)
 
         let newScale = graphMaxRMS(forPeak: peak)
-        var scaleDict = UserDefaults.standard.dictionary(forKey: scaleKey) ?? [:]
-        scaleDict[uid] = Double(newScale)
-        UserDefaults.standard.set(scaleDict, forKey: scaleKey)
+        save(uid: uid, graphMaxRMS: newScale)
         return newScale
     }
 }

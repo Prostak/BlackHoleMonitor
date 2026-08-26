@@ -143,6 +143,7 @@ struct LevelMeterView: View {
 struct ThresholdSliderView: View {
     @Binding var thresholdRMS: Float
     let maxRMS: Float
+    var onEditingEnded: (() -> Void)?
 
     var body: some View {
         VStack(spacing: 6) {
@@ -175,6 +176,9 @@ struct ThresholdSliderView: View {
                     DragGesture(minimumDistance: 0)
                         .onChanged { value in
                             thresholdRMS = rms(for: value.location.y, height: geometry.size.height)
+                        }
+                        .onEnded { _ in
+                            onEditingEnded?()
                         }
                 )
             }

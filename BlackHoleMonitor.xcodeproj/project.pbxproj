@@ -17,6 +17,7 @@
 		A10000010000000000000008 /* ThresholdStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000020000000000000010 /* ThresholdStore.swift */; };
 		A10000010000000000000009 /* TriggerBeep.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000020000000000000011 /* TriggerBeep.swift */; };
 		A1000001000000000000000A /* SerialPort.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000020000000000000012 /* SerialPort.swift */; };
+		A1000001000000000000000B /* TriggerLog.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000020000000000000013 /* TriggerLog.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -30,6 +31,7 @@
 		A10000020000000000000010 /* ThresholdStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThresholdStore.swift; sourceTree = "<group>"; };
 		A10000020000000000000011 /* TriggerBeep.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TriggerBeep.swift; sourceTree = "<group>"; };
 		A10000020000000000000012 /* SerialPort.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SerialPort.swift; sourceTree = "<group>"; };
+		A10000020000000000000013 /* TriggerLog.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TriggerLog.swift; sourceTree = "<group>"; };
 		A10000020000000000000006 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A10000020000000000000007 /* BlackHoleMonitor.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = BlackHoleMonitor.entitlements; sourceTree = "<group>"; };
 		A10000030000000000000001 /* BlackHoleMonitor.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = BlackHoleMonitor.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -67,6 +69,7 @@
 				A10000020000000000000010 /* ThresholdStore.swift */,
 				A10000020000000000000011 /* TriggerBeep.swift */,
 				A10000020000000000000012 /* SerialPort.swift */,
+				A10000020000000000000013 /* TriggerLog.swift */,
 				A10000020000000000000006 /* Info.plist */,
 				A10000020000000000000007 /* BlackHoleMonitor.entitlements */,
 			);
@@ -159,6 +162,7 @@
 				A10000010000000000000008 /* ThresholdStore.swift in Sources */,
 				A10000010000000000000009 /* TriggerBeep.swift in Sources */,
 				A1000001000000000000000A /* SerialPort.swift in Sources */,
+				A1000001000000000000000B /* TriggerLog.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

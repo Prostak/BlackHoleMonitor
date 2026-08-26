@@ -22,7 +22,10 @@ struct ContentView: View {
                 )
                 ThresholdSliderView(
                     thresholdRMS: $monitor.triggerThresholdRMS,
-                    maxRMS: monitor.graphMaxRMS
+                    maxRMS: monitor.graphMaxRMS,
+                    onEditingEnded: {
+                        monitor.commitThresholdScale()
+                    }
                 )
             }
             .frame(height: 180)
