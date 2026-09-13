@@ -15,6 +15,7 @@
 //   while chordLatched and any held: stay dual; clear latch when both released
 //   dual selection stays on LEDs until next press
 //   when an LED turns off: send idle kbd+mouse on that UART (no stuck keys)
+//   startup: Serial2 + LED15 on
 //
 // Tools -> USB Stack -> Adafruit TinyUSB Host (native)
 // Upload via BOOTSEL.
@@ -319,6 +320,8 @@ void setup() {
   Serial1.setTX(0);
   Serial1.setRX(1);
   Serial1.begin(115200);
+
+  applyLedState(true, false);
 
   USBHost.begin(0);
 }
