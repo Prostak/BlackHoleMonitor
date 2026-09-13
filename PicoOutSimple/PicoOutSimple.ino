@@ -39,7 +39,13 @@ void loop() {
   uint8_t c = Serial1.read();
 
   Keyboard.releaseAll();
-  size_t sent = Keyboard.write(c);
+  size_t sent;
+  if (c == '\n' || c == '\r') {
+    sent = Keyboard.press(KEY_RETURN);
+    Keyboard.release(KEY_RETURN);
+  } else {
+    sent = Keyboard.write(c);
+  }
   Keyboard.releaseAll();
 
   // ACK only if Keyboard accepted the keystroke into a HID report.

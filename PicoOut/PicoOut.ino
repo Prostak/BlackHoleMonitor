@@ -91,7 +91,7 @@ static void applyKeyboardReport(const uint8_t report[8]) {
 }
 
 static void applyMouseReport(const uint8_t report[4]) {
-  uint8_t buttons = report[0];
+  uint8_t buttons = (uint8_t)(report[0] & 0x07);
   int8_t dx = (int8_t)report[1];
   int8_t dy = (int8_t)report[2];
   int8_t wheel = (int8_t)report[3];

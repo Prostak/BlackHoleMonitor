@@ -39,6 +39,29 @@ bool rightPrev = false;
 static uint32_t ackMismatchCount = 0;
 static uint32_t ackTimeoutCount = 0;
 
+// Hub addresses are not in CFG_TUH_DEVICE_MAX; scan both.
+static const uint8_t USB_ADDR_MAX = CFG_TUH_DEVICE_MAX + CFG_TUH_HUB;
+
+static uint32_t mountCbCount = 0;
+static uint32_t umountCbCount = 0;
+static uint32_t hidMountCbCount = 0;
+
+static bool sawMountCb[CFG_TUH_DEVICE_MAX + CFG_TUH_HUB + 1] = {false};
+static bool sawHidMount[CFG_TUH_DEVICE_MAX + CFG_TUH_HUB + 1] = {false};
+static uint16_t seenVid[CFG_TUH_DEVICE_MAX + CFG_TUH_HUB + 1] = {0};
+static uint16_t seenPid[CFG_TUH_DEVICE_MAX + CFG_TUH_HUB + 1] = {0};
+
+static void rememberVidPid(uint8_t daddr) {
+  if (daddr == 0 || daddr > USB_ADDR_MAX) {
+    return;
+  }
+  uint16_t vid = 0, pid = 0;
+  if (tuh_vid_pid_get(daddr, &vid, &pid)) {
+    seenVid[daddr] = vid;
+    seenPid[daddr] = pid;
+  }
+}
+
 static uint8_t const keycode2ascii[128][2] = {HID_KEYCODE_TO_ASCII};
 
 static void drainRx() {
@@ -82,10 +105,10 @@ static void dumpPutChar(char c) {
   if (dumpLen + 1 >= sizeof(dumpBuf)) {
     return;
   }
-  if (c == '\n') {
-    c = '\r';
+  if (c == '\r') {
+    c = '\n';
   }
-  if (c == '\r' || (c >= 32 && c <= 126)) {
+  if (c == '\n' || (c >= 32 && c <= 126)) {
     dumpBuf[dumpLen++] = c;
     dumpBuf[dumpLen] = '\0';
   } else {
@@ -285,21 +308,31 @@ static void dump_usb_inventory() {
   dumpPut("\r=== USB inventory Pico In ===\r");
   dumpPrintf("ACK mismatches: %lu\r", (unsigned long)ackMismatchCount);
   dumpPrintf("ACK timeouts: %lu\r", (unsigned long)ackTimeoutCount);
+  dumpPrintf("CFG_TUH_HUB %u DEVICE_MAX %u\r", CFG_TUH_HUB, CFG_TUH_DEVICE_MAX);
+  dumpPrintf("mount_cb %lu umount_cb %lu hid_mount_cb %lu\r",
+             (unsigned long)mountCbCount, (unsigned long)umountCbCount,
+             (unsigned long)hidMountCbCount);
 
   uint8_t found = 0;
-  for (uint8_t daddr = 1; daddr <= CFG_TUH_DEVICE_MAX; daddr++) {
+  for (uint8_t daddr = 1; daddr <= USB_ADDR_MAX; daddr++) {
     USBHost.task();
-    if (!tuh_mounted(daddr)) {
+    bool mounted = tuh_mounted(daddr);
+    if (!mounted && !sawMountCb[daddr] && !sawHidMount[daddr]) {
       continue;
     }
     found++;
+    dumpPrintf("addr %u tuh_mounted=%u mount_cb=%u hid_mount=%u\r", daddr,
+               mounted ? 1 : 0, sawMountCb[daddr] ? 1 : 0, sawHidMount[daddr] ? 1 : 0);
+    if (seenVid[daddr] || seenPid[daddr]) {
+      dumpPrintf("cached VID:PID %04x:%04x\r", seenVid[daddr], seenPid[daddr]);
+    }
     dump_one_device(daddr);
   }
 
   if (found == 0) {
-    dumpPut("No mounted USB devices.\r");
+    dumpPut("No mount_cb and no tuh_mounted. Bus empty or host not enumerating.\r");
   } else {
-    dumpPrintf("Total mounted addresses: %u\r", found);
+    dumpPrintf("Total seen addresses: %u\r", found);
   }
   dumpPut("=== end inventory ===\r\r");
 
@@ -372,10 +405,31 @@ void loop() {
   rightPrev = right;
 }
 
+void tuh_mount_cb(uint8_t daddr) {
+  mountCbCount++;
+  if (daddr > 0 && daddr <= USB_ADDR_MAX) {
+    sawMountCb[daddr] = true;
+    rememberVidPid(daddr);
+  }
+}
+
+void tuh_umount_cb(uint8_t daddr) {
+  umountCbCount++;
+  if (daddr > 0 && daddr <= USB_ADDR_MAX) {
+    sawMountCb[daddr] = false;
+    sawHidMount[daddr] = false;
+  }
+}
+
 void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance,
                       uint8_t const *desc_report, uint16_t desc_len) {
   (void)desc_report;
   (void)desc_len;
+  hidMountCbCount++;
+  if (dev_addr > 0 && dev_addr <= USB_ADDR_MAX) {
+    sawHidMount[dev_addr] = true;
+    rememberVidPid(dev_addr);
+  }
 
   if (tuh_hid_interface_protocol(dev_addr, instance) == HID_ITF_PROTOCOL_KEYBOARD) {
     tuh_hid_receive_report(dev_addr, instance);
