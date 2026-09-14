@@ -7,6 +7,7 @@
 //   TYPE 0x01 keyboard: 8-byte boot report
 //   TYPE 0x02 mouse:    4-byte buttons,dx,dy,wheel
 // No ACK (fire-and-forget).
+// USB callback only queues a frame; loop() writes UART so IN stays armed.
 //
 // Route select (sticky):
 //   GP14 -> LED15 on, LED16 off  -> only Serial2
@@ -66,6 +67,16 @@ static void sendClearTo(Stream &port) {
   writeFrameTo(port, TYPE_MOUSE, MOUSE_IDLE, 4);
 }
 
+static int8_t sat8(int32_t v) {
+  if (v > 127) {
+    return 127;
+  }
+  if (v < -128) {
+    return -128;
+  }
+  return (int8_t)v;
+}
+
 static void applyLedState(bool leftOn, bool rightOn) {
   if (led15On && !leftOn) {
     sendClearTo(Serial2);
@@ -79,12 +90,89 @@ static void applyLedState(bool leftOn, bool rightOn) {
   digitalWrite(LED_RIGHT, rightOn ? HIGH : LOW);
 }
 
+#define FRAME_Q 32
+static const uint32_t KBD_REFRESH_MS = 15;
+static uint8_t qType[FRAME_Q];
+static uint8_t qLen[FRAME_Q];
+static uint8_t qData[FRAME_Q][8];
+static uint8_t qHead = 0;
+static uint8_t qTail = 0;
+static uint8_t qCount = 0;
+static uint8_t lastKbd[8] = {0};
+static bool haveLastKbd = false;
+static uint32_t lastKbdSendMs = 0;
+static uint8_t pendMouse[4] = {0};
+static bool havePendMouse = false;
+
+static void emitFrame(uint8_t type, const uint8_t *payload, uint8_t len);
+
+static void qPushKbd(const uint8_t *payload, uint8_t len) {
+  if (qCount >= FRAME_Q) {
+    emitFrame(TYPE_KEYBOARD, payload, len);
+    lastKbdSendMs = millis();
+    return;
+  }
+  qType[qHead] = TYPE_KEYBOARD;
+  qLen[qHead] = len;
+  memcpy(qData[qHead], payload, len);
+  qHead = (uint8_t)((qHead + 1) % FRAME_Q);
+  qCount++;
+}
+
 static void sendFrame(uint8_t type, const uint8_t *payload, uint8_t len) {
+  if (type == TYPE_MOUSE) {
+    if (len > 4) {
+      len = 4;
+    }
+    if (!havePendMouse) {
+      memset(pendMouse, 0, 4);
+      memcpy(pendMouse, payload, len);
+      havePendMouse = true;
+    } else {
+      pendMouse[0] = payload[0];
+      pendMouse[1] = (uint8_t)sat8((int16_t)(int8_t)pendMouse[1] +
+                                   (int16_t)(int8_t)payload[1]);
+      pendMouse[2] = (uint8_t)sat8((int16_t)(int8_t)pendMouse[2] +
+                                   (int16_t)(int8_t)payload[2]);
+      pendMouse[3] = (uint8_t)sat8((int16_t)(int8_t)pendMouse[3] +
+                                   (int16_t)(int8_t)payload[3]);
+    }
+    return;
+  }
+  if (len > 8) {
+    len = 8;
+  }
+  memcpy(lastKbd, payload, 8);
+  if (len < 8) {
+    memset(lastKbd + len, 0, 8 - len);
+  }
+  haveLastKbd = true;
+  qPushKbd(payload, len);
+}
+
+static void emitFrame(uint8_t type, const uint8_t *payload, uint8_t len) {
   if (led15On) {
     writeFrameTo(Serial2, type, payload, len);
   }
   if (led16On) {
     writeFrameTo(Serial1, type, payload, len);
+  }
+}
+
+static void drainFrameQueue() {
+  while (qCount > 0) {
+    uint8_t type = qType[qTail];
+    uint8_t len = qLen[qTail];
+    uint8_t payload[8];
+    memcpy(payload, qData[qTail], len);
+    qTail = (uint8_t)((qTail + 1) % FRAME_Q);
+    qCount--;
+    emitFrame(type, payload, len);
+    lastKbdSendMs = millis();
+  }
+  if (havePendMouse) {
+    emitFrame(TYPE_MOUSE, pendMouse, 4);
+    havePendMouse = false;
   }
 }
 
@@ -127,16 +215,6 @@ static int hidSlotFind(uint8_t daddr, uint8_t instance, bool alloc) {
 
 static void sendKeyboardReport(const uint8_t *report8) {
   sendFrame(TYPE_KEYBOARD, report8, 8);
-}
-
-static int8_t sat8(int32_t v) {
-  if (v > 127) {
-    return 127;
-  }
-  if (v < -128) {
-    return -128;
-  }
-  return (int8_t)v;
 }
 
 static void hidScanDescFlags(const uint8_t *d, uint16_t n, uint8_t *hasId,
@@ -328,6 +406,11 @@ void setup() {
 
 void loop() {
   USBHost.task();
+  drainFrameQueue();
+  if (haveLastKbd && (millis() - lastKbdSendMs) >= KBD_REFRESH_MS) {
+    emitFrame(TYPE_KEYBOARD, lastKbd, 8);
+    lastKbdSendMs = millis();
+  }
   updateRouteButtons();
   if (pendingMouseInst != 0xFF) {
     uint8_t addr = pendingMouseAddr;

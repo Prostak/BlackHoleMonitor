@@ -6,6 +6,8 @@
 //   TYPE 0x02 mouse:    4-byte buttons,dx,dy,wheel
 //   CHK = XOR of TYPE..last payload byte
 // No ACK (fire-and-forget).
+// Apply keyboard and mouse motion as they arrive. Defer only releases
+// for PRESS_HOLD_MS so a down/up pair is not collapsed into one USB poll.
 //
 // Tools -> USB Stack -> Pico SDK
 
@@ -20,6 +22,7 @@ static const uint8_t TYPE_KEYBOARD = 0x01;
 static const uint8_t TYPE_MOUSE = 0x02;
 static const uint8_t KBD_LEN = 8;
 static const uint8_t MOUSE_LEN = 4;
+static const uint32_t PRESS_HOLD_MS = 8;
 
 enum ParseState : uint8_t {
   WAIT_SYNC,
@@ -35,8 +38,15 @@ static uint8_t payloadIdx = 0;
 static uint8_t payload[8];
 static uint8_t chk = 0;
 
-static uint8_t prevKbd[8] = {0};
+static uint8_t wantKbd[8] = {0};
+static uint8_t sentKbd[8] = {0};
+static uint32_t sentKeyAt[6] = {0};
+static uint32_t sentModAt[8] = {0};
+
 static uint8_t prevMouseButtons = 0;
+static uint32_t mouseHoldUntil = 0;
+static bool havePendingMouseBtns = false;
+static uint8_t pendingMouseBtns = 0;
 
 static uint8_t payloadSizeForType(uint8_t type) {
   if (type == TYPE_KEYBOARD) {
@@ -57,49 +67,60 @@ static bool keyInReport(const uint8_t report[8], uint8_t key) {
   return false;
 }
 
-static void applyKeyboardReport(const uint8_t report[8]) {
-  // Release keys no longer present
-  for (uint8_t i = 2; i < 8; i++) {
-    uint8_t k = prevKbd[i];
-    if (k != 0 && !keyInReport(report, k)) {
-      Keyboard.release((uint8_t)(k + 136));
-    }
-  }
-  // Release modifiers cleared
-  for (uint8_t bit = 0; bit < 8; bit++) {
-    uint8_t mask = (uint8_t)(1u << bit);
-    if ((prevKbd[0] & mask) && !(report[0] & mask)) {
-      Keyboard.release((uint8_t)(128 + bit));
-    }
-  }
-  // Press new modifiers
-  for (uint8_t bit = 0; bit < 8; bit++) {
-    uint8_t mask = (uint8_t)(1u << bit);
-    if ((report[0] & mask) && !(prevKbd[0] & mask)) {
-      Keyboard.press((uint8_t)(128 + bit));
-    }
-  }
-  // Press new keys (HID usage -> Arduino non-printing encoding)
-  for (uint8_t i = 2; i < 8; i++) {
-    uint8_t k = report[i];
-    if (k != 0 && !keyInReport(prevKbd, k)) {
-      Keyboard.press((uint8_t)(k + 136));
-    }
-  }
-
-  memcpy(prevKbd, report, 8);
+static bool agedSince(uint32_t t0) {
+  return (uint32_t)(millis() - t0) >= PRESS_HOLD_MS;
 }
 
-static void applyMouseReport(const uint8_t report[4]) {
-  uint8_t buttons = (uint8_t)(report[0] & 0x07);
-  int8_t dx = (int8_t)report[1];
-  int8_t dy = (int8_t)report[2];
-  int8_t wheel = (int8_t)report[3];
+static bool mouseHolding() {
+  return mouseHoldUntil != 0 && (int32_t)(millis() - mouseHoldUntil) < 0;
+}
 
+static void syncKeyboard() {
+  uint32_t now = millis();
+
+  for (uint8_t bit = 0; bit < 8; bit++) {
+    uint8_t mask = (uint8_t)(1u << bit);
+    if ((sentKbd[0] & mask) && !(wantKbd[0] & mask) && agedSince(sentModAt[bit])) {
+      Keyboard.release((uint8_t)(128 + bit));
+      sentKbd[0] = (uint8_t)(sentKbd[0] & ~mask);
+    }
+    if ((wantKbd[0] & mask) && !(sentKbd[0] & mask)) {
+      Keyboard.press((uint8_t)(128 + bit));
+      sentKbd[0] = (uint8_t)(sentKbd[0] | mask);
+      sentModAt[bit] = now;
+    }
+  }
+
+  for (uint8_t slot = 0; slot < 6; slot++) {
+    uint8_t k = sentKbd[slot + 2];
+    if (k != 0 && !keyInReport(wantKbd, k) && agedSince(sentKeyAt[slot])) {
+      Keyboard.release((uint8_t)(k + 136));
+      sentKbd[slot + 2] = 0;
+    }
+  }
+
+  for (uint8_t i = 2; i < 8; i++) {
+    uint8_t k = wantKbd[i];
+    if (k == 0 || keyInReport(sentKbd, k)) {
+      continue;
+    }
+    for (uint8_t slot = 0; slot < 6; slot++) {
+      if (sentKbd[slot + 2] == 0) {
+        Keyboard.press((uint8_t)(k + 136));
+        sentKbd[slot + 2] = k;
+        sentKeyAt[slot] = now;
+        break;
+      }
+    }
+  }
+}
+
+static void applyMouseButtonBits(uint8_t buttons, bool *pressed) {
   uint8_t changed = (uint8_t)(buttons ^ prevMouseButtons);
   if (changed & MOUSE_LEFT) {
     if (buttons & MOUSE_LEFT) {
       Mouse.press(MOUSE_LEFT);
+      *pressed = true;
     } else {
       Mouse.release(MOUSE_LEFT);
     }
@@ -107,6 +128,7 @@ static void applyMouseReport(const uint8_t report[4]) {
   if (changed & MOUSE_RIGHT) {
     if (buttons & MOUSE_RIGHT) {
       Mouse.press(MOUSE_RIGHT);
+      *pressed = true;
     } else {
       Mouse.release(MOUSE_RIGHT);
     }
@@ -114,22 +136,51 @@ static void applyMouseReport(const uint8_t report[4]) {
   if (changed & MOUSE_MIDDLE) {
     if (buttons & MOUSE_MIDDLE) {
       Mouse.press(MOUSE_MIDDLE);
+      *pressed = true;
     } else {
       Mouse.release(MOUSE_MIDDLE);
     }
   }
   prevMouseButtons = buttons;
+}
+
+static void applyMouseLive(const uint8_t report[4]) {
+  uint8_t buttons = (uint8_t)(report[0] & 0x07);
+  int8_t dx = (int8_t)report[1];
+  int8_t dy = (int8_t)report[2];
+  int8_t wheel = (int8_t)report[3];
 
   if (dx != 0 || dy != 0 || wheel != 0) {
     Mouse.move(dx, dy, wheel);
   }
+
+  uint8_t released = (uint8_t)(prevMouseButtons & ~buttons);
+  uint8_t newlyDown = (uint8_t)(buttons & ~prevMouseButtons);
+
+  if (mouseHolding() && released) {
+    havePendingMouseBtns = true;
+    pendingMouseBtns = buttons;
+  } else if (newlyDown || (released && !mouseHolding())) {
+    bool pressed = false;
+    applyMouseButtonBits(buttons, &pressed);
+    havePendingMouseBtns = false;
+    if (pressed) {
+      yield();
+      mouseHoldUntil = millis() + PRESS_HOLD_MS;
+    }
+  }
 }
 
-static void handleFrame() {
-  if (frameType == TYPE_KEYBOARD && payloadLen == KBD_LEN) {
-    applyKeyboardReport(payload);
-  } else if (frameType == TYPE_MOUSE && payloadLen == MOUSE_LEN) {
-    applyMouseReport(payload);
+static void flushPendingMouseButtons() {
+  if (mouseHolding() || !havePendingMouseBtns) {
+    return;
+  }
+  bool pressed = false;
+  applyMouseButtonBits(pendingMouseBtns, &pressed);
+  havePendingMouseBtns = false;
+  if (pressed) {
+    yield();
+    mouseHoldUntil = millis() + PRESS_HOLD_MS;
   }
 }
 
@@ -163,7 +214,12 @@ static void parseByte(uint8_t b) {
 
     case WAIT_CHK:
       if (b == chk) {
-        handleFrame();
+        if (frameType == TYPE_MOUSE && payloadLen == MOUSE_LEN) {
+          applyMouseLive(payload);
+        } else if (frameType == TYPE_KEYBOARD && payloadLen == KBD_LEN) {
+          memcpy(wantKbd, payload, KBD_LEN);
+          syncKeyboard();
+        }
       }
       state = WAIT_SYNC;
       break;
@@ -195,4 +251,6 @@ void loop() {
   while (Serial1.available()) {
     parseByte((uint8_t)Serial1.read());
   }
+  syncKeyboard();
+  flushPendingMouseButtons();
 }
