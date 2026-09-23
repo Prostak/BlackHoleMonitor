@@ -1,13 +1,15 @@
-// PicoOut (v2): UART framed HID reports -> USB Keyboard + Mouse
-// UART: Serial1 GP0 (TX) / GP1 (RX) @ 115200 <- PicoIn Serial2 GP8/GP9
+// PicoOut (v3): UART framed HID reports -> USB Keyboard + Mouse
+// UART: Serial1 GP0 (TX) / GP1 (RX) @ 115200 <-> PicoIn
 //
-// Frame: [0xAA][TYPE][PAYLOAD...][CHK]
+// Frame In->Out: [0xAA][0x55][TYPE][PAYLOAD...][CHK]
 //   TYPE 0x01 keyboard: 8-byte boot report
 //   TYPE 0x02 mouse:    4-byte buttons,dx,dy,wheel
-//   CHK = XOR of TYPE..last payload byte
-// No ACK (fire-and-forget).
-// Apply keyboard and mouse motion as they arrive. Defer only releases
-// for PRESS_HOLD_MS so a down/up pair is not collapsed into one USB poll.
+//   CHK = XOR of 0x55, TYPE, and payload (not 0xAA)
+// Out->In: byte 0x01 = one credit (In may send one more frame).
+// Window CREDIT_MAX; refill after a frame is parsed. If no frame arrives
+// for CREDIT_REFRESH_MS, retransmit the whole window (lost 0x01 would
+// otherwise stall In forever). In caps credits, so extras are ignored.
+// 8 ms key-release hold does not stop credits.
 //
 // Tools -> USB Stack -> Pico SDK
 
@@ -18,14 +20,48 @@
 #include "USB.h"
 
 static const uint8_t FRAME_SYNC = 0xAA;
+static const uint8_t FRAME_SYNC2 = 0x55;
 static const uint8_t TYPE_KEYBOARD = 0x01;
 static const uint8_t TYPE_MOUSE = 0x02;
+static const uint8_t READY_BYTE = 0x01;
+static const uint8_t CREDIT_MAX = 2;
 static const uint8_t KBD_LEN = 8;
 static const uint8_t MOUSE_LEN = 4;
 static const uint32_t PRESS_HOLD_MS = 8;
+static const uint32_t CREDIT_REFRESH_MS = 20;
+
+static uint8_t granted = 0;
+static uint32_t lastRxMs = 0;
+
+static void offerCredit() {
+  while (granted < CREDIT_MAX) {
+    Serial1.write(READY_BYTE);
+    granted++;
+  }
+}
+
+static void consumeCredit() {
+  lastRxMs = millis();
+  if (granted > 0) {
+    granted--;
+  }
+}
+
+static void refreshCreditsIfIdle() {
+  uint32_t now = millis();
+  if ((uint32_t)(now - lastRxMs) < CREDIT_REFRESH_MS) {
+    return;
+  }
+  lastRxMs = now;
+  for (uint8_t i = 0; i < CREDIT_MAX; i++) {
+    Serial1.write(READY_BYTE);
+  }
+  granted = CREDIT_MAX;
+}
 
 enum ParseState : uint8_t {
   WAIT_SYNC,
+  WAIT_SYNC2,
   WAIT_TYPE,
   WAIT_PAYLOAD,
   WAIT_CHK
@@ -41,7 +77,6 @@ static uint8_t chk = 0;
 static uint8_t wantKbd[8] = {0};
 static uint8_t sentKbd[8] = {0};
 static uint32_t sentKeyAt[6] = {0};
-static uint32_t sentModAt[8] = {0};
 
 static uint8_t prevMouseButtons = 0;
 static uint32_t mouseHoldUntil = 0;
@@ -80,14 +115,13 @@ static void syncKeyboard() {
 
   for (uint8_t bit = 0; bit < 8; bit++) {
     uint8_t mask = (uint8_t)(1u << bit);
-    if ((sentKbd[0] & mask) && !(wantKbd[0] & mask) && agedSince(sentModAt[bit])) {
+    if ((sentKbd[0] & mask) && !(wantKbd[0] & mask)) {
       Keyboard.release((uint8_t)(128 + bit));
       sentKbd[0] = (uint8_t)(sentKbd[0] & ~mask);
     }
     if ((wantKbd[0] & mask) && !(sentKbd[0] & mask)) {
       Keyboard.press((uint8_t)(128 + bit));
       sentKbd[0] = (uint8_t)(sentKbd[0] | mask);
-      sentModAt[bit] = now;
     }
   }
 
@@ -188,7 +222,15 @@ static void parseByte(uint8_t b) {
   switch (state) {
     case WAIT_SYNC:
       if (b == FRAME_SYNC) {
+        state = WAIT_SYNC2;
+      }
+      break;
+
+    case WAIT_SYNC2:
+      if (b == FRAME_SYNC2) {
         state = WAIT_TYPE;
+      } else if (b != FRAME_SYNC) {
+        state = WAIT_SYNC;
       }
       break;
 
@@ -196,10 +238,10 @@ static void parseByte(uint8_t b) {
       frameType = b;
       payloadLen = payloadSizeForType(b);
       if (payloadLen == 0 || payloadLen > sizeof(payload)) {
-        state = WAIT_SYNC;
+        state = (b == FRAME_SYNC) ? WAIT_SYNC2 : WAIT_SYNC;
         break;
       }
-      chk = b;
+      chk = (uint8_t)(FRAME_SYNC2 ^ b);
       payloadIdx = 0;
       state = WAIT_PAYLOAD;
       break;
@@ -213,6 +255,7 @@ static void parseByte(uint8_t b) {
       break;
 
     case WAIT_CHK:
+      consumeCredit();
       if (b == chk) {
         if (frameType == TYPE_MOUSE && payloadLen == MOUSE_LEN) {
           applyMouseLive(payload);
@@ -221,7 +264,7 @@ static void parseByte(uint8_t b) {
           syncKeyboard();
         }
       }
-      state = WAIT_SYNC;
+      state = (b == FRAME_SYNC) ? WAIT_SYNC2 : WAIT_SYNC;
       break;
   }
 }
@@ -245,6 +288,8 @@ void setup() {
 
   Keyboard.begin();
   Mouse.begin();
+  lastRxMs = millis();
+  offerCredit();
 }
 
 void loop() {
@@ -253,4 +298,6 @@ void loop() {
   }
   syncKeyboard();
   flushPendingMouseButtons();
+  offerCredit();
+  refreshCreditsIfIdle();
 }

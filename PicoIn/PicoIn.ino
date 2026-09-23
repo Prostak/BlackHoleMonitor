@@ -1,12 +1,15 @@
-// PicoIn (v2): USB Host keyboard+mouse -> framed UART HID reports
+// PicoIn (v3): USB Host keyboard+mouse -> framed UART HID reports
 // Boot HID plus generic HID (Apple Extended 05ac:020b keys; Logitech receiver mouse).
 // UART A (LED15): Serial2 GP8 (TX) / GP9 (RX) @ 115200
 // UART B (LED16): Serial1 GP0 (TX) / GP1 (RX) @ 115200
 //
-// Frame: [0xAA][TYPE][PAYLOAD...][CHK]
+// Frame In->Out: [0xAA][0x55][TYPE][PAYLOAD...][CHK]
 //   TYPE 0x01 keyboard: 8-byte boot report
 //   TYPE 0x02 mouse:    4-byte buttons,dx,dy,wheel
-// No ACK (fire-and-forget).
+//   CHK = XOR of 0x55, TYPE, and payload (not 0xAA)
+// Out->In: byte 0x01 = one credit per UART. Dual route waits for both Outs.
+// Credit cap matches Out window so idle retransmits do not pile up.
+// No credit: coalesce mouse (sum dx/dy/wheel, latest buttons); queue keys.
 // USB callback only queues a frame; loop() writes UART so IN stays armed.
 //
 // Route select (sticky):
@@ -32,8 +35,11 @@
 Adafruit_USBH_Host USBHost;
 
 static const uint8_t FRAME_SYNC = 0xAA;
+static const uint8_t FRAME_SYNC2 = 0x55;
 static const uint8_t TYPE_KEYBOARD = 0x01;
 static const uint8_t TYPE_MOUSE = 0x02;
+static const uint8_t READY_BYTE = 0x01;
+static const uint8_t CREDIT_CAP = 2;
 
 const int BTN_LEFT = 14;
 const int BTN_RIGHT = 17;
@@ -52,8 +58,9 @@ static const uint8_t KBD_IDLE[8] = {0};
 static const uint8_t MOUSE_IDLE[4] = {0};
 
 static void writeFrameTo(Stream &port, uint8_t type, const uint8_t *payload, uint8_t len) {
-  uint8_t chk = type;
+  uint8_t chk = (uint8_t)(FRAME_SYNC2 ^ type);
   port.write(FRAME_SYNC);
+  port.write(FRAME_SYNC2);
   port.write(type);
   for (uint8_t i = 0; i < len; i++) {
     port.write(payload[i]);
@@ -103,13 +110,48 @@ static bool haveLastKbd = false;
 static uint32_t lastKbdSendMs = 0;
 static uint8_t pendMouse[4] = {0};
 static bool havePendMouse = false;
+static uint8_t credit1 = 0;
+static uint8_t credit2 = 0;
 
 static void emitFrame(uint8_t type, const uint8_t *payload, uint8_t len);
 
+static void takeCredits() {
+  while (Serial2.available()) {
+    if ((uint8_t)Serial2.read() == READY_BYTE && credit2 < CREDIT_CAP) {
+      credit2++;
+    }
+  }
+  while (Serial1.available()) {
+    if ((uint8_t)Serial1.read() == READY_BYTE && credit1 < CREDIT_CAP) {
+      credit1++;
+    }
+  }
+}
+
+static bool canEmit() {
+  if (!led15On && !led16On) {
+    return false;
+  }
+  if (led15On && credit2 == 0) {
+    return false;
+  }
+  if (led16On && credit1 == 0) {
+    return false;
+  }
+  return true;
+}
+
+static void consumeEmit() {
+  if (led15On && credit2 > 0) {
+    credit2--;
+  }
+  if (led16On && credit1 > 0) {
+    credit1--;
+  }
+}
+
 static void qPushKbd(const uint8_t *payload, uint8_t len) {
   if (qCount >= FRAME_Q) {
-    emitFrame(TYPE_KEYBOARD, payload, len);
-    lastKbdSendMs = millis();
     return;
   }
   qType[qHead] = TYPE_KEYBOARD;
@@ -157,10 +199,12 @@ static void emitFrame(uint8_t type, const uint8_t *payload, uint8_t len) {
   if (led16On) {
     writeFrameTo(Serial1, type, payload, len);
   }
+  consumeEmit();
 }
 
 static void drainFrameQueue() {
-  while (qCount > 0) {
+  takeCredits();
+  while (qCount > 0 && canEmit()) {
     uint8_t type = qType[qTail];
     uint8_t len = qLen[qTail];
     uint8_t payload[8];
@@ -170,7 +214,7 @@ static void drainFrameQueue() {
     emitFrame(type, payload, len);
     lastKbdSendMs = millis();
   }
-  if (havePendMouse) {
+  if (havePendMouse && canEmit()) {
     emitFrame(TYPE_MOUSE, pendMouse, 4);
     havePendMouse = false;
   }
@@ -283,12 +327,12 @@ static void sendMouseBytes(const uint8_t *p, uint16_t n, bool axis16) {
 }
 
 static void sendMouseReport(const uint8_t *report, uint16_t len, int slot) {
-  // C539 report proto (Debug dump): n=8 or 9
+  // C539 report proto (Debug dump): n=9
   // 02 | buttons | pad | x16le | y16le | wheel | pan
-  // Do not use this layout on boot 3–4 byte packets: skipping byte 0
-  // turns X into "buttons" (0x02 = right click → context menu flash).
-  if (len >= 8 && report[0] >= 1 && report[0] <= 15) {
-    uint8_t payload[4];
+  // Require n>=9 and a C539 slot. Right button is also 0x02 — a boot
+  // packet [02, dx, dy, ...] must stay boot, or the cursor jumps.
+  if (slot >= 0 && hidSkipKbd[slot] && len >= 9 && report[0] == 0x02) {
+    uint8_t payload[4] = {0, 0, 0, 0};
     payload[0] = (uint8_t)(report[1] & 0x07);
     int16_t dx =
         (int16_t)((uint16_t)report[3] | ((uint16_t)report[4] << 8));
@@ -296,13 +340,11 @@ static void sendMouseReport(const uint8_t *report, uint16_t len, int slot) {
         (int16_t)((uint16_t)report[5] | ((uint16_t)report[6] << 8));
     payload[1] = (uint8_t)sat8(dx);
     payload[2] = (uint8_t)sat8(dy);
-    payload[3] = (len >= 8) ? report[7] : 0;
+    payload[3] = report[7];
     sendFrame(TYPE_MOUSE, payload, 4);
     return;
   }
 
-  // Boot mouse: [buttons, x, y, wheel?] — never strip byte 0.
-  (void)slot;
   sendMouseBytes(report, len, false);
 }
 
@@ -354,6 +396,9 @@ static void processGenericReport(uint8_t daddr, uint8_t instance,
     kind = 0;
   }
 
+  if (kind == 1 && hidSkipKbd[slot]) {
+    kind = 0;
+  }
   if (kind == 1) {
     sendKeyboardFlexible(payload, n);
   } else if (kind == 2) {
@@ -407,7 +452,9 @@ void setup() {
 void loop() {
   USBHost.task();
   drainFrameQueue();
-  if (haveLastKbd && (millis() - lastKbdSendMs) >= KBD_REFRESH_MS) {
+  takeCredits();
+  if (haveLastKbd && canEmit() &&
+      (millis() - lastKbdSendMs) >= KBD_REFRESH_MS) {
     emitFrame(TYPE_KEYBOARD, lastKbd, 8);
     lastKbdSendMs = millis();
   }
@@ -436,11 +483,9 @@ void tuh_hid_mount_cb(uint8_t dev_addr, uint8_t instance,
         hidReportInfo[slot], MAX_HID_REPORTS, desc_report, desc_len);
   }
   if (slot >= 0 && vid == 0x046d && pid == 0xc539) {
+    hidSkipKbd[slot] = 1;
     if (proto == HID_ITF_PROTOCOL_MOUSE) {
       hidHasReportId[slot] = 1;
-    }
-    if (proto == HID_ITF_PROTOCOL_KEYBOARD) {
-      hidSkipKbd[slot] = 1;
     }
   }
   if (slot >= 0 && proto == HID_ITF_PROTOCOL_NONE) {
@@ -475,15 +520,17 @@ void tuh_hid_umount_cb(uint8_t dev_addr, uint8_t instance) {
 void tuh_hid_report_received_cb(uint8_t dev_addr, uint8_t instance,
                                 uint8_t const *report, uint16_t len) {
   uint8_t const proto = tuh_hid_interface_protocol(dev_addr, instance);
+  uint16_t vid = 0, pid = 0;
+  tuh_vid_pid_get(dev_addr, &vid, &pid);
+  const bool c539 = (vid == 0x046d && pid == 0xc539);
 
   if (proto == HID_ITF_PROTOCOL_KEYBOARD && len >= 8) {
-    int slot = hidSlotFind(dev_addr, instance, false);
-    if (slot < 0 || !hidSkipKbd[slot]) {
+    if (!c539) {
       sendKeyboardFlexible(report, len);
     }
   } else if (proto == HID_ITF_PROTOCOL_MOUSE && len >= 3) {
     sendMouseReport(report, len, hidSlotFind(dev_addr, instance, false));
-  } else if (proto == HID_ITF_PROTOCOL_NONE) {
+  } else if (proto == HID_ITF_PROTOCOL_NONE && !c539) {
     processGenericReport(dev_addr, instance, report, len);
   }
 
