@@ -185,7 +185,7 @@ struct ThresholdSliderView: View {
 
             Text(String(format: "Scale %.2f%%", maxRMS * 100))
                 .font(.system(size: 9, weight: .medium, design: .monospaced))
-                .foregroundStyle(.secondary)
+                .foregroundStyle(Color.white.opacity(0.55))
         }
         .frame(width: 44)
     }

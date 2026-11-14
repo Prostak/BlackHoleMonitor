@@ -8,22 +8,22 @@ struct BlackHoleMonitorApp: App {
     var body: some Scene {
         WindowGroup {
             ContentView(monitor: monitor)
-                .frame(minWidth: 560, minHeight: 420)
+                .frame(minWidth: 560, minHeight: 480)
         }
         .windowStyle(.hiddenTitleBar)
         .commands {
             CommandGroup(replacing: .newItem) {}
 
             CommandGroup(replacing: .appInfo) {
-                Button("About BlackHole Monitor") {
+                Button("About Bhm_12") {
                     NSApplication.shared.orderFrontStandardAboutPanel(options: [
-                        .applicationName: "BlackHole Monitor",
+                        .applicationName: "Bhm_12",
                         .applicationVersion: "1.0",
                     ])
                 }
             }
 
-            CommandGroup(replacing: .appSettings) {
+            CommandGroup(after: .appInfo) {
                 Button("Settings…") {
                     monitor.openSystemSettings()
                 }
@@ -31,7 +31,7 @@ struct BlackHoleMonitorApp: App {
             }
 
             CommandGroup(replacing: .appVisibility) {
-                Button("Hide BlackHole Monitor") {
+                Button("Hide Bhm_12") {
                     NSApplication.shared.hide(nil)
                 }
                 .keyboardShortcut("h")
@@ -47,7 +47,7 @@ struct BlackHoleMonitorApp: App {
             }
 
             CommandGroup(replacing: .appTermination) {
-                Button("Quit BlackHole Monitor") {
+                Button("Quit Bhm_12") {
                     NSApplication.shared.terminate(nil)
                 }
                 .keyboardShortcut("q")
@@ -75,7 +75,7 @@ struct BlackHoleMonitorApp: App {
             }
 
             CommandMenu("Help") {
-                Button("BlackHole Monitor Help") {
+                Button("Bhm_12 Help") {
                     if let url = URL(string: "https://existential.audio/blackhole/") {
                         NSWorkspace.shared.open(url)
                     }

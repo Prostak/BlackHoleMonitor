@@ -90,8 +90,16 @@ final class SerialPort: @unchecked Sendable {
         guard tcdrain(currentFD) == 0 else { throw SerialPortError.writeFailed }
     }
 
+    func writeASCII(_ byte: UInt8) throws {
+        try write(Data([byte]))
+    }
+
     func writeBacktick() throws {
-        try write(Data([0x60])) // ASCII `
+        try writeASCII(0x60) // ASCII `
+    }
+
+    func writeA() throws {
+        try writeASCII(0x41) // ASCII A
     }
 
     func close() {

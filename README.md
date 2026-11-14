@@ -1,66 +1,125 @@
-# BlackHole Monitor
+# Bhm_12 — BlackHole Monitor for macOS 12 (Intel)
 
-macOS-приложение для мониторинга уровня аудио с входа **BlackHole 2ch** в реальном времени.
+Копия проекта для работы на **MacBook Air Early 2015 / macOS 12.7.6** в Cursor.
 
-## Возможности
+Продукт: **`Bhm_12.app`** · Bundle ID: `com.local.Bhm12` · Deployment: **macOS 12.0+** · Universal **arm64 + x86_64**.
 
-- Захват аудио с устройства «BlackHole 2ch»
-- Отображение текущего уровня (dB) и пика
-- Полоска-индикатор и прокручивающийся график
-- Запрос разрешения на доступ к микрофону/аудио входу
+Исходная ветка разработки: `macos-12-bhm12` (репозиторий BlackHoleMonitor на основном Mac).
 
-## Требования
+---
 
-- macOS 13+
-- Xcode 15+
-- Установленный [BlackHole 2ch](https://existential.audio/blackhole/)
+## Открыть в Cursor на Air
 
-## Сборка и установка (рекомендуется)
+1. Открой папку проекта как workspace:  
+   `/Volumes/MikeShared/Mike/Projects/Bhm_12`  
+   (или локальную копию, если шару смонтировал в другое место).
+2. Главный Xcode-проект: `BlackHoleMonitor.xcodeproj`  
+   (имя target/scheme всё ещё `BlackHoleMonitor`, но **PRODUCT_NAME = Bhm_12**).
+3. Готовый билд (если положен): `dist/Bhm_12.app` и `dist/Bhm_12.zip`.
 
-Чтобы путь к `.app` был стабильным (`~/Applications`), используйте установку через скрипт:
+### Сборка на этом Mac (если есть Xcode)
 
 ```bash
-cd ~/Projects/BlackHoleMonitor
+cd "/Volumes/MikeShared/Mike/Projects/Bhm_12"   # или куда скопировал
 chmod +x scripts/install.sh
 ./scripts/install.sh
-open ~/Applications/BlackHoleMonitor.app
+open ~/Applications/Bhm_12.app
 ```
 
-Один раз выдайте разрешения для **этой** копии:
-- **Microphone** — при первом запуске
-- **Accessibility** — см. раздел ниже (нужно обновлять после каждой переустановки)
+На Air **без свежего Xcode** проще запускать уже собранный `dist/Bhm_12.app`  
+(ПКМ → Open из‑за Gatekeeper). После каждой переустановки заново выдай:
 
-Дальше запускайте только `~/Applications/BlackHoleMonitor.app`, а не ⌘R в Xcode. После изменений в коде снова запустите `./scripts/install.sh`.
+- Microphone  
+- Accessibility  
+- Screen Recording (нужен для Battle / OCR)
 
-### Accessibility permissions (English)
+---
 
-Each time you **rebuild and reinstall** the app (`./scripts/install.sh`), macOS treats it as a new binary. You must **remove BlackHoleMonitor from the Accessibility list and add it again**:
+## Карта файлов
 
-1. Open **System Settings → Privacy & Security → Accessibility**
-2. Select **BlackHoleMonitor** and click **−** to remove it
-3. Run the newly installed app from `~/Applications/BlackHoleMonitor.app`
-4. When prompted, allow control of your computer — or click **+** and add `~/Applications/BlackHoleMonitor.app` manually
-
-Microphone permission usually survives reinstalls; Accessibility does not.
-
-## Разработка в Xcode
-
-```bash
-cd ~/Projects/BlackHoleMonitor
-open BlackHoleMonitor.xcodeproj
+```
+Bhm_12/
+├── README.md                          ← этот файл
+├── BlackHoleMonitor.xcodeproj/        ← открой в Xcode / собирай отсюда
+├── scripts/install.sh                 ← Release → ~/Applications/Bhm_12.app
+├── dist/                              ← готовый .app / .zip (если есть)
+├── BlackHoleMonitor/                  ← исходники приложения
+│   ├── BlackHoleMonitorApp.swift      ← @main, меню
+│   ├── ContentView.swift              ← UI (Activity Fishing/Battle, кнопки)
+│   ├── AudioLevelMonitor.swift        ← аудио RMS, режимы, serial/keepalive
+│   ├── AutobattleController.swift     ← state machine Battle (poll ~1s)
+│   ├── AutobattleDetector.swift       ← захват окна SS + OCR + lock ROI
+│   ├── ScreenSharingAutomation.swift  ← фокус SS + CGEvent (` / A)
+│   ├── CompatSleep.swift              ← Task.sleep для macOS 12
+│   ├── SerialPort.swift               ← /dev/cu.… → Pico
+│   ├── AudioPassThrough.swift
+│   ├── AudioDeviceHelper.swift
+│   ├── LevelGraphView.swift
+│   ├── ThresholdStore.swift
+│   ├── TriggerBeep.swift / TriggerLog.swift
+│   ├── Info.plist
+│   └── BlackHoleMonitor.entitlements
+└── SerialKeyboardBridge/              ← отдельная утилита (не Bhm_12)
 ```
 
-⌘R удобен для отладки, но путь к `.app` в DerivedData меняется — macOS может снова спрашивать Accessibility.
+Скриншоты в этой папке (`Screen Shot …png`) — артефакты с Air, не часть сборки.
 
-## Использование
+---
 
-1. Направьте звук в BlackHole 2ch (через Audio MIDI Setup или Multi-Output Device).
-2. Запустите BlackHole Monitor.
-3. Разрешите доступ к микрофону, если система спросит.
-4. Приложение автоматически подключится к «BlackHole 2ch» и покажет уровень.
+## Режимы
 
-Кнопки **Старт** / **Стоп** — перезапуск и остановка мониторинга.
+| Activity | Поведение |
+|----------|-----------|
+| **Fishing** | Порог RMS → `` ` `` (Screen Sharing или serial). Keepalive `` ` `` ~30 с. |
+| **Battle** | OCR кнопки Autobattle в окне Screen Sharing → `A`. Fishing-cast/keepalive выключены. |
 
-## Если нет доступа
+**Key output:** Screen Sharing / serial (Pico) / local beep (только fishing).
 
-Системные настройки → Конфиденциальность и безопасность → Микрофон → включите **BlackHole Monitor**.
+### Battle / OCR (важно для производительности на Air 2015)
+
+1. Пока кнопка **не найдена** — широкий ROI (низ окна ~40–60% × 84–93%), OCR `.accurate`.
+2. После **первого нахождения** — **lock**: снимается и OCR’ится только прямоугольник кнопки (не всё окно). В статусе: `search` / `locked`.
+3. Lock **не** сбрасывается от OCR-промахов (серая кнопка может висеть долго). Сброс: кнопка **Unlock ROI**, Stop/Start, пропало окно SS, или сменился размер окна.
+
+---
+
+## Известные фиксы уже в этом дереве
+
+- **macOS 12:** `CompatSleep` вместо `Task.sleep(for:)` (13+).
+- **Screen Sharing path:** не хардкодить только `/System/Applications/Utilities/…` — на Monterey путь другой; резолв по bundle id + кандидаты (иначе диалог «The file can't be found»).
+- **UI на Monterey:** не ставить глобальный `.foregroundStyle(.white)` — кнопки светлые, текст пропадал. Сейчас `.preferredColorScheme(.dark)` + `.bordered` / явные цвета.
+- Default Activity: **Battle**.
+
+---
+
+## Разрешения после переустановки
+
+Каждый новый бинарник macOS считает «другим приложением»:
+
+1. System Preferences → Security & Privacy → Privacy → **Accessibility** — удалить Bhm_12, добавить снова.  
+2. То же для **Screen Recording**.  
+3. Microphone обычно остаётся.
+
+На Monterey: **System Preferences**, не System Settings.
+
+---
+
+## Что править дальше (если продолжишь в Cursor на Air)
+
+Типичные точки:
+
+- ROI / lock / OCR: `BlackHoleMonitor/AutobattleDetector.swift`
+- Тайминги poll / 2s delay: `AutobattleController.swift` (`pollIntervalSeconds`, `redWithoutGrayDelaySeconds`)
+- UI: `ContentView.swift`
+- Клавиши / фокус SS: `ScreenSharingAutomation.swift`
+- Deployment / имя продукта: `BlackHoleMonitor.xcodeproj/project.pbxproj` (`MACOSX_DEPLOYMENT_TARGET`, `PRODUCT_NAME`, `ARCHS`)
+
+Не нужно трогать `SerialKeyboardBridge/` для обычной работы Bhm_12.
+
+---
+
+## Связь с основным Mac
+
+Основной репозиторий: `~/Projects/BlackHoleMonitor`, ветка **`macos-12-bhm12`**.  
+Эта папка на MikeShared — **рабочая копия для Air**, чтобы Cursor там видел те же исходники.  
+После правок на Air имеет смысл скопировать изменённые `.swift` обратно на основной Mac / в git.

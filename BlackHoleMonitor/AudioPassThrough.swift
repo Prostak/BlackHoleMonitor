@@ -12,7 +12,7 @@ final class AudioPassThrough {
     private var converter: AVAudioConverter?
     private let maxScheduledBuffers = 4
     private var scheduledBufferCount = 0
-    nonisolated(unsafe) private(set) var acceptsBuffers = false
+    private(set) var acceptsBuffers = false
 
     var onError: ((Error) -> Void)?
 
@@ -190,9 +190,12 @@ final class AudioPassThrough {
 
         var errorDescription: String? {
             switch self {
-            case .noInputChannels: "Selected device has no input channels"
-            case .formatChanged: "Capture audio format changed during pass-through"
-            case .unsupportedFormat: "Could not convert capture audio for pass-through"
+            case .noInputChannels:
+                return "Selected device has no input channels"
+            case .formatChanged:
+                return "Capture audio format changed during pass-through"
+            case .unsupportedFormat:
+                return "Could not convert capture audio for pass-through"
             }
         }
     }

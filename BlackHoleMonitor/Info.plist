@@ -16,6 +16,8 @@
 	<string>6.0</string>
 	<key>CFBundleName</key>
 	<string>$(PRODUCT_NAME)</string>
+	<key>CFBundleDisplayName</key>
+	<string>Bhm_12</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
@@ -30,6 +32,10 @@
 	<string>This app needs microphone access to monitor audio levels from BlackHole 2ch.</string>
 	<key>NSAccessibilityUsageDescription</key>
 	<string>This app needs Accessibility access to send keystrokes to Screen Sharing when the audio threshold is reached.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>This app needs camera access in Battle mode to read the Autobattle button from the Elgato capture device.</string>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>This app needs Screen Recording access in Battle mode to detect the Autobattle button in the Screen Sharing window.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 </dict>

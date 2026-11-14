@@ -10,6 +10,22 @@ struct AudioInputOption: Identifiable, Hashable {
     var id: String { uid }
 }
 
+enum ActivityMode: String, CaseIterable, Identifiable {
+    case fishing
+    case battle
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .fishing:
+            return "Fishing"
+        case .battle:
+            return "Battle"
+        }
+    }
+}
+
 enum TriggerResponseMode: String, CaseIterable, Identifiable {
     case screenSharing
     case serial
@@ -19,9 +35,12 @@ enum TriggerResponseMode: String, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .screenSharing: "Send ` to Screen Sharing"
-        case .serial: "Send ` via serial (Pico)"
-        case .localBeep: "Local beep only"
+        case .screenSharing:
+            return "Send keys via Screen Sharing"
+        case .serial:
+            return "Send keys via serial (Pico)"
+        case .localBeep:
+            return "Local beep only (fishing)"
         }
     }
 }
@@ -62,6 +81,36 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
             updatePassThrough()
         }
     }
+    @Published var activityMode: ActivityMode = {
+        ActivityMode(
+            rawValue: UserDefaults.standard.string(forKey: "activityMode") ?? ""
+        ) ?? .battle
+    }() {
+        didSet {
+            guard oldValue != activityMode else { return }
+            UserDefaults.standard.set(activityMode.rawValue, forKey: Self.activityModeKey)
+            handleActivityModeChange()
+        }
+    }
+
+    func setActivityMode(_ mode: ActivityMode) {
+        activityMode = mode
+    }
+
+    @Published var autobattleCaptureSource: AutobattleCaptureSource = AutobattleDetector.captureSource {
+        didSet {
+            guard oldValue != autobattleCaptureSource else { return }
+            AutobattleDetector.captureSource = autobattleCaptureSource
+            autobattlePreviewTick &+= 1
+            if activityMode == .battle, isRunning, autobattleCaptureSource == .camera {
+                requestCameraAndStartCapture()
+            }
+            if activityMode == .battle {
+                autobattleStatusText = autobattle.statusText
+            }
+        }
+    }
+
     @Published var triggerResponseMode: TriggerResponseMode = {
         TriggerResponseMode(
             rawValue: UserDefaults.standard.string(forKey: "triggerResponseMode") ?? ""
@@ -79,9 +128,16 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
     }
 
     @Published var serialPortPath: String = {
-        UserDefaults.standard.string(forKey: "serialPortPath") ?? SerialPort.defaultPath
+        AudioLevelMonitor.sanitizedSerialPortPath(
+            UserDefaults.standard.string(forKey: "serialPortPath")
+        )
     }() {
         didSet {
+            let cleaned = AudioLevelMonitor.sanitizedSerialPortPath(serialPortPath)
+            if cleaned != serialPortPath {
+                serialPortPath = cleaned
+                return
+            }
             guard oldValue != serialPortPath else { return }
             UserDefaults.standard.set(serialPortPath, forKey: Self.serialPortPathKey)
             if triggerResponseMode == .serial {
@@ -91,25 +147,143 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
     }
 
     @Published private(set) var serialConnected = false
+    @Published private(set) var autobattleStatusText = "Autobattle: off"
+    @Published private(set) var lastDebugCaptureMessage: String?
+    @Published private(set) var autobattlePaused = false
+    @Published private(set) var recentTripleBeepScores: [TripleBeepScoreEntry] = []
+    @Published private(set) var autobattlePreviewTick: Int = 0
+    @Published private(set) var autobattleTMRangeLabel = "—"
+    @Published var autobattleHardTM: Double = AutobattleDetector.templateMatchConfidence {
+        didSet {
+            let clamped = min(max(autobattleHardTM, 0.50), 0.95)
+            if clamped != autobattleHardTM {
+                autobattleHardTM = clamped
+                return
+            }
+            AutobattleDetector.templateMatchConfidence = clamped
+            if autobattleSoftTM > clamped {
+                autobattleSoftTM = clamped
+            }
+        }
+    }
+    @Published var autobattleSoftTM: Double = AutobattleDetector.templateSoftMatchConfidence {
+        didSet {
+            let hard = AutobattleDetector.templateMatchConfidence
+            let clamped = min(max(autobattleSoftTM, 0.40), hard)
+            if clamped != autobattleSoftTM {
+                autobattleSoftTM = clamped
+                return
+            }
+            AutobattleDetector.templateSoftMatchConfidence = clamped
+        }
+    }
 
+    private static let activityModeKey = "activityMode"
     private static let triggerResponseModeKey = "triggerResponseMode"
     private static let serialPortPathKey = "serialPortPath"
 
     private let captureSession = AVCaptureSession()
-    private nonisolated(unsafe) let passThrough = AudioPassThrough()
+    private let passThrough = AudioPassThrough()
     private let serialPort = SerialPort()
     private let captureQueue = DispatchQueue(label: "com.blackholemonitor.capture", qos: .userInteractive)
+    let autobattle = AutobattleController()
+    private var autobattleStatusCancellable: AnyCancellable?
+    private var autobattlePausedCancellable: AnyCancellable?
+    private var autobattleBeepScoresCancellable: AnyCancellable?
+    private var autobattlePreviewCancellable: AnyCancellable?
+    private var autobattleTMRangeCancellable: AnyCancellable?
+    private var appFocusObservers: [NSObjectProtocol] = []
 
     override init() {
         super.init()
-        passThrough.onError = { [weak self] error in
-            Task { @MainActor in
+        AutobattleDetector.migrateTMDefaultsIfNeeded()
+        autobattleHardTM = AutobattleDetector.templateMatchConfidence
+        autobattleSoftTM = AutobattleDetector.templateSoftMatchConfidence
+        passThrough.onError = { [weak self] (error: Error) in
+            Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.passThroughEnabled = false
                 self.statusMessage = "Pass-through failed: \(AudioErrorFormatting.describe(error))"
             }
         }
+        autobattle.onSendA = { [weak self] in
+            guard let self else { return false }
+            return await self.sendKeyA()
+        }
+        autobattleStatusCancellable = autobattle.$statusText.sink { [weak self] text in
+            self?.autobattleStatusText = text
+        }
+        autobattlePausedCancellable = autobattle.$isPaused.sink { [weak self] paused in
+            self?.autobattlePaused = paused
+        }
+        autobattleBeepScoresCancellable = autobattle.$recentBeepScores.sink { [weak self] scores in
+            self?.recentTripleBeepScores = scores
+        }
+        autobattlePreviewCancellable = autobattle.$previewTick.sink { [weak self] tick in
+            self?.autobattlePreviewTick = tick
+        }
+        autobattleTMRangeCancellable = autobattle.$recentTMRangeLabel.sink { [weak self] label in
+            self?.autobattleTMRangeLabel = label
+        }
+        installAppFocusObservers()
         updateSerialConnectionForMode()
+    }
+
+    func resetAutobattleTMThresholds() {
+        autobattleHardTM = AutobattleDetector.defaultTemplateMatchConfidence
+        autobattleSoftTM = AutobattleDetector.defaultTemplateSoftMatchConfidence
+    }
+
+    deinit {
+        for observer in appFocusObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
+    }
+
+    private func installAppFocusObservers() {
+        let center = NotificationCenter.default
+        appFocusObservers.append(center.addObserver(
+            forName: NSApplication.didResignActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.autobattle.noteAppDidResignActive()
+            }
+        })
+        appFocusObservers.append(center.addObserver(
+            forName: NSApplication.didBecomeActiveNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.autobattle.noteAppDidBecomeActive()
+                self?.autobattlePaused = self?.autobattle.isPaused ?? false
+                self?.autobattleStatusText = self?.autobattle.statusText ?? ""
+            }
+        })
+    }
+
+    func continueAutobattle() {
+        autobattle.continueWatching()
+        autobattlePaused = autobattle.isPaused
+        autobattleStatusText = autobattle.statusText
+        statusMessage = listeningStatusMessage()
+    }
+
+    func pauseAutobattle() {
+        autobattle.pauseAwaitingContinue(reason: "paused — press Continue")
+        autobattlePaused = true
+        autobattleStatusText = autobattle.statusText
+    }
+
+    /// Drop locked button ROI and return to wide search (manual only — not on OCR misses).
+    func resetAutobattleLock() {
+        AutobattleDetector.resetButtonLock()
+        if activityMode == .battle {
+            autobattleStatusText = "Autobattle: lock cleared — searching…"
+        }
+        statusMessage = "Autobattle ROI lock cleared (wide search)"
     }
     private var peakHoldRMS: Float = 0
     private var peakHoldUntil: Date = .distantPast
@@ -129,7 +303,7 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
             startMonitoring()
         case .notDetermined:
             AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
-                Task { @MainActor in
+                Task { @MainActor [weak self] in
                     self?.permissionGranted = granted
                     if granted {
                         self?.startMonitoring()
@@ -217,6 +391,7 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
     func stopMonitoring() {
         cancelAutomation()
         stopKeepaliveMonitoring()
+        stopAutobattleWatching()
         passThrough.stop()
         captureQueue.async { [weak self] in
             self?.tearDownCaptureSession()
@@ -338,6 +513,7 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
             if self.isRunning {
                 self.updatePassThrough()
                 self.updateKeepaliveMonitoring()
+                self.updateAutobattleWatching()
                 if !self.passThroughEnabled {
                     self.statusMessage = self.listeningStatusMessage()
                 }
@@ -382,6 +558,7 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
     }
 
     private func checkThreshold(rms: Float) {
+        guard activityMode == .fishing else { return }
         guard isRunning, isArmed, !awaitingRearm, !isExecutingAutomation else { return }
         guard Date() >= soundIgnoreUntil else { return }
         guard rms >= triggerThresholdRMS else { return }
@@ -425,7 +602,7 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
         automationTask = Task { [weak self] in
             guard let self else { return }
 
-            try? await Task.sleep(for: .seconds(Self.triggerDelaySeconds))
+            await CompatSleep.seconds(Self.triggerDelaySeconds)
             guard !Task.isCancelled else { return }
             let stillRunning = await MainActor.run { self.isRunning }
             guard stillRunning else { return }
@@ -445,7 +622,7 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
             }
 
             let delay = ScreenSharingAutomation.secondBacktickDelay()
-            try? await Task.sleep(for: .seconds(delay))
+            await CompatSleep.seconds(delay)
             guard !Task.isCancelled else { return }
 
             let secondSent = await MainActor.run {
@@ -470,7 +647,7 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
         automationTask = Task { [weak self] in
             guard let self else { return }
 
-            try? await Task.sleep(for: .seconds(Self.triggerDelaySeconds))
+            await CompatSleep.seconds(Self.triggerDelaySeconds)
             guard !Task.isCancelled else { return }
             let stillRunning = await MainActor.run { self.isRunning }
             guard stillRunning else { return }
@@ -489,7 +666,7 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
             }
 
             let delay = ScreenSharingAutomation.secondBacktickDelay()
-            try? await Task.sleep(for: .seconds(delay))
+            await CompatSleep.seconds(delay)
             guard !Task.isCancelled else { return }
 
             await MainActor.run { self.noteCast(reason: .castWait) }
@@ -503,7 +680,7 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
                 return
             }
 
-            try? await Task.sleep(for: .seconds(ScreenSharingAutomation.postSecondKeyReturnDelaySeconds))
+            await CompatSleep.seconds(ScreenSharingAutomation.postSecondKeyReturnDelaySeconds)
             await ScreenSharingAutomation.activateSelf()
 
             await MainActor.run {
@@ -513,19 +690,107 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
         }
     }
 
+    private func handleActivityModeChange() {
+        cancelAutomation()
+        isExecutingAutomation = false
+        isArmed = true
+        awaitingRearm = false
+        updateKeepaliveMonitoring()
+        updateAutobattleWatching()
+        if isRunning, !passThroughEnabled {
+            statusMessage = listeningStatusMessage()
+        }
+    }
+
+    private func updateAutobattleWatching() {
+        if isRunning, activityMode == .battle {
+            if AutobattleDetector.captureSource == .camera {
+                requestCameraAndStartCapture()
+            } else {
+                AutobattleDetector.shutdownCaptureSource()
+            }
+            autobattle.start()
+        } else {
+            stopAutobattleWatching()
+        }
+    }
+
+    private func stopAutobattleWatching() {
+        autobattle.stop()
+        AutobattleDetector.shutdownCaptureSource()
+        autobattleStatusText = autobattle.statusText
+    }
+
+    private func requestCameraAndStartCapture() {
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .authorized:
+            if AutobattleDetector.prepareCameraCapture() {
+                let name = AutobattleCameraCapture.shared.activeDeviceName ?? "camera"
+                statusMessage = "Battle camera: \(name)"
+            } else {
+                let err = AutobattleCameraCapture.shared.lastError ?? "start failed"
+                statusMessage = "Battle camera failed: \(err)"
+                autobattleStatusText = "Autobattle: \(AutobattleDetector.missingSourceMessage)"
+            }
+        case .notDetermined:
+            AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
+                Task { @MainActor in
+                    guard let self else { return }
+                    if granted {
+                        self.requestCameraAndStartCapture()
+                    } else {
+                        self.statusMessage = "Camera permission denied"
+                        self.autobattleStatusText = "Autobattle: camera permission denied"
+                    }
+                }
+            }
+        default:
+            statusMessage = "Camera permission denied — enable in System Settings"
+            autobattleStatusText = "Autobattle: camera permission denied"
+        }
+    }
+
+    /// Capture current Autobattle source frame + ROI for tuning detection.
+    func captureAutobattleDebugSnapshot() {
+        if AutobattleDetector.captureSource == .camera {
+            requestCameraAndStartCapture()
+        }
+        let snapshot = AutobattleDetector.captureDebugSnapshot()
+        lastDebugCaptureMessage = snapshot.message
+        if activityMode == .battle {
+            autobattleStatusText = "Debug: \(snapshot.stats.summary)"
+        }
+        statusMessage = snapshot.message
+        if let first = snapshot.savedURLs.first {
+            NSWorkspace.shared.activateFileViewerSelecting([first])
+        }
+    }
+
+    /// Manual A for verifying Key output without waiting for detection.
+    func testSendA() async {
+        statusMessage = "Test: sending A…"
+        let sent = await sendKeyA()
+        statusMessage = sent ? "Test: A sent OK" : "Test: A send failed"
+        if activityMode == .battle {
+            autobattleStatusText = statusMessage
+        }
+    }
+
     private func updateKeepaliveMonitoring() {
         stopKeepaliveMonitoring()
-        guard isRunning else { return }
+        guard isRunning, activityMode == .fishing else { return }
         guard triggerResponseMode == .screenSharing || triggerResponseMode == .serial else { return }
 
         keepaliveTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(Self.keepaliveIntervalSeconds))
+                await CompatSleep.seconds(Self.keepaliveIntervalSeconds)
                 guard !Task.isCancelled else { return }
 
                 let mode = await MainActor.run { () -> TriggerResponseMode? in
                     guard let self else { return nil }
-                    guard self.isRunning, !self.isExecutingAutomation else { return nil }
+                    guard self.isRunning,
+                          self.activityMode == .fishing,
+                          !self.isExecutingAutomation else { return nil }
                     switch self.triggerResponseMode {
                     case .screenSharing, .serial:
                         return self.triggerResponseMode
@@ -590,12 +855,25 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
         }
     }
 
+    /// Reject accidental non-paths (e.g. a typed Cyrillic letter) and restore the default.
+    fileprivate static func sanitizedSerialPortPath(_ raw: String?) -> String {
+        let trimmed = (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("/dev/") {
+            return trimmed
+        }
+        return SerialPort.defaultPath
+    }
+
     @discardableResult
     private func openSerialPort() -> Bool {
+        let path = AudioLevelMonitor.sanitizedSerialPortPath(serialPortPath)
+        if path != serialPortPath {
+            serialPortPath = path
+        }
         do {
-            try serialPort.open(path: serialPortPath)
+            try serialPort.open(path: path)
             serialConnected = true
-            statusMessage = "Serial connected: \(serialPortPath)"
+            statusMessage = "Serial connected: \(path)"
             return true
         } catch {
             serialConnected = false
@@ -626,6 +904,39 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
         }
     }
 
+    @discardableResult
+    private func sendAViaSerial() -> Bool {
+        if !serialPort.isOpen {
+            guard openSerialPort() else { return false }
+        }
+
+        do {
+            try serialPort.writeA()
+            serialConnected = true
+            return true
+        } catch {
+            serialConnected = false
+            statusMessage = "Serial send A failed: \(error.localizedDescription)"
+            return false
+        }
+    }
+
+    /// Battle-mode key A: serial if selected, otherwise Screen Sharing CGEvent
+    /// (including when fishing On-trigger is localBeep).
+    private func sendKeyA() async -> Bool {
+        let sent: Bool
+        switch triggerResponseMode {
+        case .serial:
+            sent = await MainActor.run { sendAViaSerial() }
+        case .screenSharing, .localBeep:
+            sent = await ScreenSharingAutomation.focusAndTypeA()
+        }
+        if sent {
+            TriggerBeep.shared.play(amplitude: 0.35)
+        }
+        return sent
+    }
+
     private func stopKeepaliveMonitoring() {
         keepaliveTask?.cancel()
         keepaliveTask = nil
@@ -633,14 +944,26 @@ final class AudioLevelMonitor: NSObject, ObservableObject {
 
     private func listeningStatusMessage() -> String {
         let device = selectedDeviceName ?? "input"
-        switch triggerResponseMode {
-        case .screenSharing:
-            return "Listening to \"\(device)\""
-        case .serial:
-            let link = serialConnected ? "serial OK" : "serial offline"
-            return "Listening to \"\(device)\" · \(link)"
-        case .localBeep:
-            return "Listening to \"\(device)\" · local beep mode"
+        switch activityMode {
+        case .battle:
+            let link: String
+            switch triggerResponseMode {
+            case .serial:
+                link = serialConnected ? "serial OK" : "serial offline"
+            case .screenSharing, .localBeep:
+                link = "Screen Sharing keys"
+            }
+            return "Battle · \"\(device)\" · \(link)"
+        case .fishing:
+            switch triggerResponseMode {
+            case .screenSharing:
+                return "Fishing · listening to \"\(device)\""
+            case .serial:
+                let link = serialConnected ? "serial OK" : "serial offline"
+                return "Fishing · \"\(device)\" · \(link)"
+            case .localBeep:
+                return "Fishing · \"\(device)\" · local beep"
+            }
         }
     }
 

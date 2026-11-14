@@ -16,7 +16,14 @@ enum ScreenSharingAutomation {
     static let secondBacktickOffsetMaximum: TimeInterval = 1.2
 
     private static let backtickKeyCode: CGKeyCode = 50
-    private static let appURL = URL(fileURLWithPath: "/System/Applications/Utilities/Screen Sharing.app")
+    private static let aKeyCode: CGKeyCode = 0
+
+    /// Monterey keeps Screen Sharing under CoreServices; newer macOS under Utilities.
+    private static let appPathCandidates = [
+        "/System/Library/CoreServices/Applications/Screen Sharing.app",
+        "/System/Applications/Utilities/Screen Sharing.app",
+        "/Applications/Utilities/Screen Sharing.app",
+    ]
 
     @discardableResult
     static func focusAndTypeBacktick() async -> Bool {
@@ -24,13 +31,23 @@ enum ScreenSharingAutomation {
             return false
         }
 
-        try? await Task.sleep(for: .seconds(activationDelaySeconds))
-        return await sendBacktick()
+        await CompatSleep.seconds(activationDelaySeconds)
+        return await sendKey(backtickKeyCode)
     }
 
     @discardableResult
     static func typeBacktick() async -> Bool {
-        await sendBacktick()
+        await sendKey(backtickKeyCode)
+    }
+
+    @discardableResult
+    static func focusAndTypeA() async -> Bool {
+        guard await ensureScreenSharingFocused() else {
+            return false
+        }
+
+        await CompatSleep.seconds(activationDelaySeconds)
+        return await sendKey(aKeyCode)
     }
 
     @discardableResult
@@ -39,13 +56,13 @@ enum ScreenSharingAutomation {
             return false
         }
 
-        try? await Task.sleep(for: .seconds(activationDelaySeconds))
-        guard await sendBacktick() else {
+        await CompatSleep.seconds(activationDelaySeconds)
+        guard await sendKey(backtickKeyCode) else {
             await activateSelf()
             return false
         }
 
-        try? await Task.sleep(for: .seconds(keepaliveSettleDelaySeconds))
+        await CompatSleep.seconds(keepaliveSettleDelaySeconds)
         await activateSelf()
         return true
     }
@@ -56,8 +73,8 @@ enum ScreenSharingAutomation {
             return false
         }
 
-        try? await Task.sleep(for: .seconds(secondFocusSettleDelaySeconds))
-        return await sendBacktick()
+        await CompatSleep.seconds(secondFocusSettleDelaySeconds)
+        return await sendKey(backtickKeyCode)
     }
 
     @MainActor
@@ -84,17 +101,35 @@ enum ScreenSharingAutomation {
             return app.activate(options: [.activateIgnoringOtherApps])
         }
 
+        guard let appURL = resolveScreenSharingURL() else {
+            NSLog("Screen Sharing.app not found (bundle %@)", bundleIdentifier)
+            return false
+        }
+
         let configuration = NSWorkspace.OpenConfiguration()
         configuration.activates = true
 
         return await withCheckedContinuation { continuation in
             workspace.openApplication(at: appURL, configuration: configuration) { app, error in
                 if let error {
-                    NSLog("Failed to launch Screen Sharing: \(error.localizedDescription)")
+                    NSLog("Failed to launch Screen Sharing at %@: %@", appURL.path, error.localizedDescription)
                 }
                 continuation.resume(returning: app != nil && error == nil)
             }
         }
+    }
+
+    /// Prefer Launch Services lookup; never open a missing hardcoded path (shows "file can't be found").
+    private static func resolveScreenSharingURL() -> URL? {
+        if let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) {
+            return url
+        }
+
+        for path in appPathCandidates where FileManager.default.fileExists(atPath: path) {
+            return URL(fileURLWithPath: path)
+        }
+
+        return nil
     }
 
     private static func triangularRandomOffset() -> TimeInterval {
@@ -112,13 +147,13 @@ enum ScreenSharingAutomation {
     }
 
     @discardableResult
-    private static func sendBacktick() async -> Bool {
+    private static func sendKey(_ keyCode: CGKeyCode) async -> Bool {
         await MainActor.run {
             switchToEnglishKeyboard()
         }
-        try? await Task.sleep(for: .seconds(layoutSwitchDelaySeconds))
+        await CompatSleep.seconds(layoutSwitchDelaySeconds)
         return await MainActor.run {
-            postBacktickKeyEvent()
+            postKeyEvent(keyCode)
         }
     }
 
@@ -144,13 +179,13 @@ enum ScreenSharingAutomation {
     }
 
     @MainActor
-    private static func postBacktickKeyEvent() -> Bool {
+    private static func postKeyEvent(_ keyCode: CGKeyCode) -> Bool {
         guard let source = CGEventSource(stateID: .hidSystemState) else {
             return false
         }
 
-        guard let keyDown = CGEvent(keyboardEventSource: source, virtualKey: backtickKeyCode, keyDown: true),
-              let keyUp = CGEvent(keyboardEventSource: source, virtualKey: backtickKeyCode, keyDown: false) else {
+        guard let keyDown = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true),
+              let keyUp = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false) else {
             return false
         }
 
